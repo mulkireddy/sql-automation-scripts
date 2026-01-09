@@ -1,0 +1,140 @@
+#-----
+#Prerequisites
+#The Share: You need a folder (e.g., \\UATServer1\ReplShare) that is accessible by both UAT 1 and UAT 2.
+
+#Permissions: The SQL Server Service Accounts on both UAT 1 and UAT 2 must have Read/Write access to this share folder.
+#------
+
+
+
+
+# --- CONFIGURATION ---------------------------------------------------------
+$UATPubServer    = "UAT_SERVER_1"
+$UATSubServer    = "UAT_SERVER_2"
+
+# --- DEFINING DIFFERENT DATABASE NAMES ---
+$PubDBName       = "Prod_Source_DB"   # The name on UAT 1 (Publisher)
+$SubDBName       = "UAT_Target_DB"    # The name on UAT 2 (Subscriber)
+$PublicationName = "MyPublicationName"
+
+# 1. INPUT: Local path on UAT 1 where you put the 5 Prod files
+$ProdDropPath    = "C:\Refresh_DropLocation"
+$ProdFileFilter  = "*.bak" 
+
+# 2. OUTPUT: The Shared Network Path (Accessible by UAT1 and UAT2)
+$SharedPath      = "\\UAT_SERVER_1\ReplShare" 
+
+# Path to your SQL Configuration Script
+$ReplScriptPath  = "C:\Scripts\Create_Publication_And_Articles.sql"
+# ---------------------------------------------------------------------------
+
+$UATInitFile = "$SharedPath\UAT_Repl_Init.bak"
+
+try {
+    # =======================================================================
+    # STEP 1: LOCATE PROD SPLIT BACKUPS
+    # =======================================================================
+    Write-Host "1. Scanning $ProdDropPath..." -ForegroundColor Cyan
+    $BackupFiles = Get-ChildItem -Path $ProdDropPath -Filter $ProdFileFilter | Sort-Object Name
+    if ($BackupFiles.Count -eq 0) { Throw "No backup files found." }
+
+    $DiskClauses = $BackupFiles | ForEach-Object { "DISK = '$($_.FullName)'" }
+    $DiskString  = $DiskClauses -join ", `n         "
+
+    # =======================================================================
+    # STEP 2: RESTORE UAT 1 (PUBLISHER DB NAME)
+    # =======================================================================
+    Write-Host "2. Restoring Publisher DB [$PubDBName] on UAT 1..." -ForegroundColor Cyan
+    
+    $restoreUat1 = @"
+    USE master;
+    ALTER DATABASE [$PubDBName] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    RESTORE DATABASE [$PubDBName] 
+    FROM $DiskString
+    WITH REPLACE, RECOVERY;
+    ALTER DATABASE [$PubDBName] SET MULTI_USER;
+"@
+    Invoke-Sqlcmd -ServerInstance $UATPubServer -Query $restoreUat1 -QueryTimeout 7200
+
+    # =======================================================================
+    # STEP 3: CONFIGURE PUBLISHER
+    # =======================================================================
+    Write-Host "3. Configuring Publication on [$PubDBName]..." -ForegroundColor Cyan
+    
+    # Run your Article creation script
+    Invoke-Sqlcmd -ServerInstance $UATPubServer -InputFile $ReplScriptPath
+
+    # Enable 'Initialize from Backup'
+    $enableBackupInit = @"
+    EXEC sp_changepublication 
+        @publication = '$PublicationName', 
+        @property = 'allow_initialize_from_backup', 
+        @value = 'true';
+"@
+    Invoke-Sqlcmd -ServerInstance $UATPubServer -Query $enableBackupInit
+
+    # =======================================================================
+    # STEP 4: BACKUP UAT 1 (USING PUB DB NAME)
+    # =======================================================================
+    Write-Host "4. Backing up [$PubDBName] to Share..." -ForegroundColor Cyan
+    
+    $backupUat1 = @"
+    BACKUP DATABASE [$PubDBName] 
+    TO DISK = '$UATInitFile' 
+    WITH FORMAT, INIT, STATS=10;
+"@
+    Invoke-Sqlcmd -ServerInstance $UATPubServer -Query $backupUat1
+
+    # =======================================================================
+    # STEP 5: RESTORE UAT 2 (INTO SUBSCRIBER DB NAME)
+    # =======================================================================
+    Write-Host "5. Restoring into [$SubDBName] on UAT 2..." -ForegroundColor Cyan
+
+    # NOTE: We restore the backup of PubDBName INTO SubDBName
+    $restoreUat2 = @"
+    USE master;
+    
+    -- Check if DB exists before trying to set single user
+    IF DB_ID('$SubDBName') IS NOT NULL
+        ALTER DATABASE [$SubDBName] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+        
+    RESTORE DATABASE [$SubDBName] 
+    FROM DISK = '$UATInitFile' 
+    WITH REPLACE, RECOVERY;
+    
+    -- IMPORTANT: If the logical file names differ, you might need 'WITH MOVE' here.
+    -- E.g. MOVE 'ProdData' TO 'D:\Data\UAT_Target.mdf'
+    
+    ALTER DATABASE [$SubDBName] SET MULTI_USER;
+"@
+    Invoke-Sqlcmd -ServerInstance $UATSubServer -Query $restoreUat2 -QueryTimeout 7200
+
+    # =======================================================================
+    # STEP 6: ADD SUBSCRIPTION (MAPPING NAMES)
+    # =======================================================================
+    Write-Host "6. Linking Subscription with Name Mapping..." -ForegroundColor Cyan
+
+    $addSubscription = @"
+    USE [$PubDBName];  -- Run context is the Publisher DB
+    
+    EXEC sp_addsubscription 
+        @publication = '$PublicationName', 
+        @subscriber = '$UATSubServer', 
+        @destination_db = '$SubDBName',  -- <--- THIS IS THE KEY MAPPING
+        @subscription_type = N'Push', 
+        @sync_type = N'initialize with backup', 
+        @backupdevicetype = 'disk', 
+        @backupdevicename = '$UATInitFile';
+
+    EXEC sp_addpushsubscription_agent 
+        @publication = '$PublicationName', 
+        @subscriber = '$UATSubServer', 
+        @subscriber_db = '$SubDBName';   -- <--- ALSO HERE
+"@
+    Invoke-Sqlcmd -ServerInstance $UATPubServer -Query $addSubscription
+
+    Write-Host "DONE! Synced [$PubDBName] -> [$SubDBName]." -ForegroundColor Green
+}
+catch {
+    Write-Error "PROCESS FAILED: $($_.Exception.Message)"
+}
