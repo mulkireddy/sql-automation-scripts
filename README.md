@@ -1,1 +1,1 @@
-# sql-automation-scripts
+# sql-scripts
