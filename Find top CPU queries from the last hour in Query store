@@ -1,0 +1,18 @@
+-- Find top CPU queries from the last hour in Query store(when the alert happened)
+SELECT TOP 20
+    q.query_id,
+    qt.query_sql_text,
+    SUM(rs.count_executions) AS total_executions,
+    SUM(rs.avg_cpu_time * rs.count_executions) AS total_cpu_time_us,
+    AVG(rs.avg_cpu_time) AS avg_cpu_time_us,
+    MAX(rs.max_cpu_time) AS max_cpu_time_us,
+    AVG(rs.avg_duration) AS avg_duration_us,
+    AVG(rs.avg_logical_io_reads) AS avg_reads
+FROM sys.query_store_query q
+JOIN sys.query_store_query_text qt ON q.query_text_id = qt.query_text_id
+JOIN sys.query_store_plan p ON q.query_id = p.query_id
+JOIN sys.query_store_runtime_stats rs ON p.plan_id = rs.plan_id
+JOIN sys.query_store_runtime_stats_interval rsi ON rs.runtime_stats_interval_id = rsi.runtime_stats_interval_id
+WHERE rsi.start_time >= DATEADD(HOUR, -1, GETUTCDATE())  -- Last 1 hour
+GROUP BY q.query_id, qt.query_sql_text
+ORDER BY total_cpu_time_us DESC;
