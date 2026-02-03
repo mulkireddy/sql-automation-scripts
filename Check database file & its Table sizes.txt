@@ -1,0 +1,19 @@
+-- Check database file sizes
+SELECT 
+    name AS FileName,
+    size/128.0 AS CurrentSizeMB,
+    size/128.0 - CAST(FILEPROPERTY(name, 'SpaceUsed') AS int)/128.0 AS FreeSpaceMB
+FROM sys.database_files;
+
+-- Table sizes
+SELECT 
+    t.NAME AS TableName,
+    p.rows AS RowCounts,
+    SUM(a.total_pages) * 8 AS TotalSpaceKB
+FROM sys.tables t
+INNER JOIN sys.indexes i ON t.OBJECT_ID = i.object_id
+INNER JOIN sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
+INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
+WHERE t.is_ms_shipped = 0
+GROUP BY t.Name, p.Rows
+ORDER BY TotalSpaceKB DESC;
