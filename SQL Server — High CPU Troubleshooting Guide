@@ -1,0 +1,525 @@
+# SQL Server — High CPU Troubleshooting Guide
+
+> **Category:** CPU | **Related Wait Types:** `SOS_SCHEDULER_YIELD`, `CXPACKET`, `SOS_WORKER_MIGRATION` | **Applies To:** SQL Server 2016+, Azure SQL VM (IaaS)
+
+---
+
+## What Causes High CPU in SQL Server?
+
+SQL Server CPU spikes when queries perform **excessive computation** — sorting millions of rows, hashing large joins, scanning entire tables, or running in uncontrolled parallelism. Unlike disk waits where SQL Server is idle waiting, high CPU means SQL Server is actively working hard — just doing the **wrong kind of work**.
+
+Think of it like a worker manually searching through a million paper files instead of using a filing index — lots of effort, very inefficient.
+
+---
+
+## Step 1 — Confirm SQL Server is the CPU Culprit
+
+Before diving into SQL, confirm SQL Server is actually causing the CPU spike.
+
+### On Azure VM — Check in Portal
+
+```
+Azure Portal → Virtual Machine → Metrics → CPU Percentage
+```
+
+If CPU is > 80% sustained → proceed to Step 2.
+
+### On the VM — Check via Task Manager or PowerShell
+
+```powershell
+# Check which process is using CPU
+Get-Process | Sort-Object CPU -Descending | Select-Object -First 10 Name, CPU, Id
+```
+
+If `sqlservr.exe` is at the top → SQL Server is the cause. Proceed to Step 2.
+
+---
+
+## Step 2 — Check SQL Server CPU Usage in Real Time
+
+```sql
+-- See current CPU usage by SQL Server vs OS
+SELECT 
+    record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int') 
+                                        AS sql_cpu_utilization,
+    record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int')         
+                                        AS system_idle,
+    100 - record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int')
+        - record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int')
+                                        AS other_process_cpu,
+    DATEADD(ms, -1 * ((SELECT cpu_ticks/(cpu_ticks/ms_ticks) 
+                        FROM sys.dm_os_sys_info) - [timestamp]), GETDATE()) AS event_time
+FROM (
+    SELECT TOP 30 [timestamp], CONVERT(XML, record) AS record
+    FROM sys.dm_os_ring_buffers
+    WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+      AND record LIKE '%<SystemHealth>%'
+    ORDER BY [timestamp] DESC
+) AS ring_data
+ORDER BY event_time DESC;
+```
+
+**Interpretation:**
+- `sql_cpu_utilization` > 80% consistently → SQL Server is burning CPU
+- `other_process_cpu` high → another process (antivirus, backup agent) is competing
+
+---
+
+## Step 3 — Find Currently Running High CPU Queries
+
+Catch the queries burning CPU **right now**:
+
+```sql
+SELECT TOP 20
+    r.session_id,
+    r.status,
+    r.cpu_time,
+    r.total_elapsed_time / 1000        AS elapsed_secs,
+    r.logical_reads,
+    r.reads                             AS physical_reads,
+    r.writes,
+    r.wait_type,
+    r.wait_time / 1000.0               AS wait_secs,
+    DB_NAME(r.database_id)             AS database_name,
+    t.text                             AS query_text,
+    qp.query_plan
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+CROSS APPLY sys.dm_exec_query_plan(r.plan_handle) qp
+WHERE r.session_id > 50
+  AND r.status = 'running'
+ORDER BY r.cpu_time DESC;
+```
+
+> **Tip:** Click `query_plan` in SSMS results to open graphical execution plan. Look for **Table Scan**, **Hash Match**, and **Sort** operators with large row counts — these are the CPU hogs.
+
+---
+
+## Step 4 — Find Historical Worst CPU Queries
+
+Find the queries that have consumed the most CPU **since last SQL Server restart**:
+
+```sql
+SELECT TOP 20
+    qs.total_worker_time / 1000                             AS total_cpu_ms,
+    qs.total_worker_time / qs.execution_count / 1000       AS avg_cpu_ms,
+    qs.execution_count,
+    qs.total_elapsed_time / qs.execution_count / 1000      AS avg_duration_ms,
+    qs.total_logical_reads / qs.execution_count            AS avg_logical_reads,
+    qs.total_physical_reads / qs.execution_count           AS avg_physical_reads,
+    qs.creation_time                                        AS plan_created,
+    t.text                                                  AS query_text,
+    qp.query_plan
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) t
+CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+ORDER BY qs.total_worker_time DESC;
+```
+
+**Key columns to focus on:**
+- `avg_cpu_ms` > 1000ms → query uses > 1 second of CPU per execution
+- `avg_logical_reads` very high → missing index causing large scans
+- `execution_count` very high → frequently called query, small savings = big total impact
+
+---
+
+## Step 5 — Check for Excessive Parallelism (CXPACKET)
+
+Uncontrolled parallelism is one of the top CPU killers. One query can consume ALL CPU cores simultaneously:
+
+```sql
+-- Check CXPACKET wait stats
+SELECT 
+    wait_type,
+    waiting_tasks_count,
+    wait_time_ms / 1000.0              AS total_wait_secs,
+    wait_time_ms * 100.0 /
+    SUM(wait_time_ms) OVER()           AS pct_of_total_waits
+FROM sys.dm_os_wait_stats
+WHERE wait_type IN ('CXPACKET', 'CXCONSUMER', 'SOS_SCHEDULER_YIELD')
+ORDER BY wait_time_ms DESC;
+```
+
+```sql
+-- Check current MAXDOP and Cost Threshold settings
+SELECT name, value_in_use, description
+FROM sys.configurations
+WHERE name IN (
+    'max degree of parallelism',
+    'cost threshold for parallelism'
+);
+```
+
+**Recommended settings:**
+
+| Setting | Default | Recommended |
+|---|---|---|
+| Max Degree of Parallelism (MAXDOP) | 0 (unlimited) | Number of physical cores per NUMA node, max 8 |
+| Cost Threshold for Parallelism | 5 | 25 – 50 |
+
+```sql
+-- Fix: Set MAXDOP and Cost Threshold
+EXEC sp_configure 'max degree of parallelism', 4;       -- adjust to your core count
+EXEC sp_configure 'cost threshold for parallelism', 50;
+RECONFIGURE WITH OVERRIDE;
+```
+
+> **Note:** On Azure SQL VM, check how many vCPUs your VM has first.
+> `Azure Portal → VM → Overview → vCPUs`
+
+---
+
+## Step 6 — Check for Missing Indexes
+
+Missing indexes force SQL Server to scan entire tables, reading millions of rows and burning CPU on sorting and filtering:
+
+```sql
+SELECT TOP 20
+    ROUND(migs.avg_total_user_cost * 
+          migs.avg_user_impact * 
+          (migs.user_seeks + migs.user_scans), 0)    AS priority_score,
+    mid.statement                                     AS table_name,
+    mid.equality_columns,
+    mid.inequality_columns,
+    mid.included_columns,
+    migs.user_seeks,
+    migs.user_scans,
+    migs.avg_user_impact                             AS estimated_improvement_pct,
+    'CREATE INDEX IX_' + 
+    REPLACE(REPLACE(mid.statement, '[', ''), ']', '') +
+    ' ON ' + mid.statement + 
+    ' (' + ISNULL(mid.equality_columns, '') + ')' +
+    CASE WHEN mid.included_columns IS NOT NULL
+         THEN ' INCLUDE (' + mid.included_columns + ')'
+         ELSE '' END                                  AS suggested_index
+FROM sys.dm_db_missing_index_groups mig
+JOIN sys.dm_db_missing_index_group_stats migs 
+    ON mig.index_group_handle = migs.group_handle
+JOIN sys.dm_db_missing_index_details mid 
+    ON mig.index_handle = mid.index_handle
+ORDER BY priority_score DESC;
+```
+
+> `estimated_improvement_pct` of 80 means SQL Server estimates creating this index will reduce that query's cost by 80%. Start with the highest scores.
+
+---
+
+## Step 7 — Check for Index Fragmentation
+
+Fragmented indexes cause SQL Server to read and process far more data pages than necessary, wasting CPU on unnecessary work:
+
+```sql
+SELECT 
+    OBJECT_NAME(ips.object_id)          AS table_name,
+    i.name                              AS index_name,
+    ips.avg_fragmentation_in_percent,
+    ips.page_count,
+    ips.avg_page_space_used_in_percent
+FROM sys.dm_db_index_physical_stats(
+    DB_ID(), NULL, NULL, NULL, 'SAMPLED') ips
+JOIN sys.indexes i 
+    ON ips.object_id = i.object_id 
+    AND ips.index_id = i.index_id
+WHERE ips.avg_fragmentation_in_percent > 10
+  AND ips.page_count > 500
+ORDER BY ips.avg_fragmentation_in_percent DESC;
+```
+
+```sql
+-- Reorganize (fragmentation 10% - 30%, online operation)
+ALTER INDEX [IndexName] ON [dbo].[YourTable] REORGANIZE;
+
+-- Rebuild (fragmentation > 30%, more thorough)
+ALTER INDEX [IndexName] ON [dbo].[YourTable] REBUILD;
+
+-- Rebuild all indexes on a table
+ALTER INDEX ALL ON [dbo].[YourTable] REBUILD;
+```
+
+---
+
+## Step 8 — Check for Outdated Statistics
+
+Stale statistics cause SQL Server to choose inefficient execution plans — scanning entire tables instead of using indexes, burning unnecessary CPU:
+
+```sql
+-- Find tables with outdated statistics
+SELECT 
+    OBJECT_NAME(s.object_id)        AS table_name,
+    s.name                          AS stats_name,
+    sp.last_updated,
+    sp.rows,
+    sp.rows_sampled,
+    sp.modification_counter,
+    CAST(sp.modification_counter * 100.0 / 
+         NULLIF(sp.rows, 0) AS DECIMAL(5,2))  AS modification_pct
+FROM sys.stats s
+CROSS APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) sp
+WHERE sp.modification_counter > 0
+ORDER BY sp.modification_counter DESC;
+```
+
+```sql
+-- Update stats on a specific table
+UPDATE STATISTICS [dbo].[YourTable] WITH FULLSCAN;
+
+-- Update all stats across the entire database
+EXEC sp_updatestats;
+```
+
+---
+
+## Step 9 — Detect and Fix Parameter Sniffing
+
+Parameter sniffing occurs when SQL Server caches an execution plan built for one set of parameter values, but the plan is terrible for different values. This can cause runaway CPU usage:
+
+```sql
+-- Check if a query has multiple plans with wildly different resource usage
+SELECT 
+    qs.execution_count,
+    qs.total_worker_time / qs.execution_count / 1000  AS avg_cpu_ms,
+    qs.min_worker_time / 1000                          AS min_cpu_ms,
+    qs.max_worker_time / 1000                          AS max_cpu_ms,
+    qs.total_logical_reads / qs.execution_count        AS avg_logical_reads,
+    t.text                                             AS query_text,
+    qp.query_plan
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) t
+CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+WHERE (qs.max_worker_time / NULLIF(qs.min_worker_time, 0)) > 10  -- max CPU 10x higher than min
+ORDER BY qs.max_worker_time DESC;
+```
+
+**If `max_cpu_ms` is 10x higher than `avg_cpu_ms` → parameter sniffing is likely.**
+
+```sql
+-- Fix Option 1: Clear the plan cache for a specific query
+-- Get plan handle from query above, then:
+DBCC FREEPROCCACHE (plan_handle);
+
+-- Fix Option 2: Add OPTION (RECOMPILE) to force fresh plan each time
+SELECT * FROM Orders WHERE CustomerId = @CustomerId
+OPTION (RECOMPILE);
+
+-- Fix Option 3: Use OPTIMIZE FOR hint
+SELECT * FROM Orders WHERE CustomerId = @CustomerId
+OPTION (OPTIMIZE FOR (@CustomerId UNKNOWN));
+```
+
+---
+
+## Step 10 — Check for Implicit Conversions
+
+Implicit conversions happen when SQL Server compares columns of different data types. It silently converts every row in the table, bypassing indexes and burning CPU:
+
+```sql
+-- Find implicit conversions in execution plans
+SELECT 
+    DB_NAME(qp.dbid)          AS database_name,
+    OBJECT_NAME(qp.objectid)  AS object_name,
+    t.text                    AS query_text,
+    qp.query_plan
+FROM sys.dm_exec_cached_plans cp
+CROSS APPLY sys.dm_exec_query_plan(cp.plan_handle) qp
+CROSS APPLY sys.dm_exec_sql_text(cp.plan_handle) t
+WHERE CAST(qp.query_plan AS NVARCHAR(MAX)) LIKE '%CONVERT_IMPLICIT%';
+```
+
+**Common causes and fixes:**
+
+| Cause | Example | Fix |
+|---|---|---|
+| varchar vs nvarchar | `WHERE Name = N'value'` on varchar column | Match data types in query and table |
+| int vs varchar | `WHERE Id = '123'` where Id is INT | Remove quotes: `WHERE Id = 123` |
+| Date as string | `WHERE OrderDate = '2024-01-01'` | Use `CAST('2024-01-01' AS DATE)` |
+
+---
+
+## Step 11 — Check Stored Procedures and Ad-Hoc SQL Recompiles
+
+Excessive recompiles force SQL Server to regenerate execution plans repeatedly, burning CPU:
+
+```sql
+-- Find objects with high recompile rates
+SELECT TOP 20
+    OBJECT_NAME(ps.object_id)              AS object_name,
+    ps.type_desc,
+    ps.execution_count,
+    ps.total_recompile_count,
+    ps.total_recompile_count * 100.0 / 
+    NULLIF(ps.execution_count, 0)          AS recompile_pct,
+    ps.total_worker_time / 1000            AS total_cpu_ms
+FROM sys.dm_exec_procedure_stats ps
+WHERE ps.total_recompile_count > 0
+ORDER BY ps.total_recompile_count DESC;
+```
+
+**Common recompile causes and fixes:**
+
+| Cause | Fix |
+|---|---|
+| DDL changes inside stored proc | Move DDL outside or use `WITH RECOMPILE` intentionally |
+| SET options changing per connection | Standardize SET options in application connection string |
+| Temp table stats changing | Add `OPTION (RECOMPILE)` to queries using temp tables |
+| Statistics updated mid-execution | Expected — only a concern if frequency is very high |
+
+---
+
+## Step 12 — SOS_SCHEDULER_YIELD Specific Check
+
+If `SOS_SCHEDULER_YIELD` is your top wait type, CPU is truly maxed out and threads are fighting for scheduler time:
+
+```sql
+-- Check scheduler health
+SELECT 
+    scheduler_id,
+    cpu_id,
+    status,
+    runnable_tasks_count,       -- tasks waiting for CPU (should be near 0)
+    work_queue_count,           -- pending work items
+    current_tasks_count,
+    active_workers_count,
+    load_factor
+FROM sys.dm_os_schedulers
+WHERE status = 'VISIBLE ONLINE'
+ORDER BY runnable_tasks_count DESC;
+```
+
+**Interpretation:**
+- `runnable_tasks_count` > 2 per scheduler consistently → CPU is saturated
+- Multiple schedulers all showing high runnable tasks → need more CPU cores
+
+---
+
+## Step 13 — Infrastructure Fix (Azure SQL VM)
+
+If the queries are tuned but CPU is still maxed, the VM needs more compute power.
+
+### 13.1 — Check Current VM Size
+
+```
+Azure Portal → Virtual Machine → Overview → Size
+```
+
+### 13.2 — Resize VM for More CPU
+
+```
+Azure Portal → Virtual Machine → Size → Select larger size → Resize
+```
+
+**Recommended SQL Server VM sizes (General Purpose):**
+
+| Workload | VM Series | Why |
+|---|---|---|
+| Dev / Test | Standard_D4s_v5 (4 vCPU) | Cost effective |
+| Small Prod | Standard_D8s_v5 (8 vCPU) | Good balance |
+| Medium Prod | Standard_E16s_v5 (16 vCPU) | Memory optimized |
+| Heavy OLTP | Standard_M32s (32 vCPU) | High memory ratio |
+
+> **Rule of thumb:** Choose memory-optimized (E-series) over compute-optimized for SQL Server. More RAM means less disk I/O which reduces CPU work.
+
+### 13.3 — Enable Accelerated Networking
+
+Reduces CPU overhead for network packet processing:
+
+```
+Azure Portal → VM → Networking → Network Interface → Enable Accelerated Networking
+```
+
+---
+
+## Step 14 — Verify the Fix
+
+After applying fixes, confirm CPU has reduced:
+
+```sql
+-- Clear wait stats before applying fix, then re-run after 30 minutes
+-- WARNING: Resets all historical wait data
+DBCC SQLPERF ('sys.dm_os_wait_stats', CLEAR);
+
+-- After 30 minutes re-check CPU waits
+SELECT 
+    wait_type,
+    waiting_tasks_count,
+    wait_time_ms / 1000.0              AS total_wait_secs,
+    wait_time_ms * 100.0 /
+    SUM(wait_time_ms) OVER()           AS pct_of_total_waits
+FROM sys.dm_os_wait_stats
+WHERE wait_type IN (
+    'SOS_SCHEDULER_YIELD',
+    'CXPACKET',
+    'CXCONSUMER'
+)
+ORDER BY wait_time_ms DESC;
+```
+
+**Success criteria:**
+- `SOS_SCHEDULER_YIELD` drops below 5% of total waits
+- `CXPACKET` drops below 10% of total waits
+- VM CPU utilization drops below 70% sustained
+
+---
+
+## Root Cause Decision Tree
+
+```
+High CPU confirmed on SQL Server?
+        │
+        ├── CXPACKET high?
+        │       └── YES → Parallelism problem
+        │               ├── MAXDOP = 0? → Set MAXDOP to core count max 8 (Step 5)
+        │               └── Cost Threshold = 5? → Increase to 50 (Step 5)
+        │
+        ├── Specific query using high avg_cpu_ms?
+        │       └── YES → Query problem
+        │               ├── High logical_reads? → Missing index (Step 6)
+        │               ├── Fragmented indexes? → Rebuild indexes (Step 7)
+        │               ├── Outdated stats? → Update statistics (Step 8)
+        │               ├── max_cpu 10x avg_cpu? → Parameter sniffing (Step 9)
+        │               └── CONVERT_IMPLICIT in plan? → Fix data types (Step 10)
+        │
+        ├── High recompile count?
+        │       └── YES → Fix DDL or SET options in stored procs (Step 11)
+        │
+        ├── SOS_SCHEDULER_YIELD high + all schedulers busy?
+        │       └── YES → CPU cores maxed out
+        │               └── All queries tuned? → Resize VM to more vCPUs (Step 13.2)
+        │
+        └── Other process using CPU (not sqlservr.exe)?
+                └── YES → Check antivirus, backup agents, monitoring tools
+                        └── Exclude SQL data folders from antivirus scanning
+```
+
+---
+
+## Common Causes Summary
+
+| Cause | Fix | Step |
+|---|---|---|
+| MAXDOP = 0 (unlimited parallelism) | Set MAXDOP to core count, max 8 | Step 5 |
+| Cost Threshold for Parallelism too low | Increase from 5 to 50 | Step 5 |
+| Missing indexes → table scans | Create missing indexes | Step 6 |
+| Fragmented indexes | Rebuild / Reorganize indexes | Step 7 |
+| Outdated statistics | Run UPDATE STATISTICS | Step 8 |
+| Parameter sniffing | OPTION (RECOMPILE) or OPTIMIZE FOR | Step 9 |
+| Implicit data type conversions | Fix data types in queries | Step 10 |
+| Excessive stored proc recompiles | Fix DDL and SET options | Step 11 |
+| VM CPU cores maxed out | Resize to larger Azure VM size | Step 13.2 |
+| Antivirus scanning SQL folders | Exclude SQL data directories | Step 13 |
+
+---
+
+## Related Wait Types
+
+| Wait Type | Relationship |
+|---|---|
+| `CXPACKET` | Parallelism wait — directly tied to high CPU from parallel queries |
+| `CXCONSUMER` | Consumer thread in parallel plan waiting — pair with CXPACKET |
+| `SOS_SCHEDULER_YIELD` | CPU fully saturated — threads yielding scheduler time |
+| `SOS_WORKER_MIGRATION` | Worker threads migrating between schedulers under CPU pressure |
+| `RESOURCE_SEMAPHORE` | Memory grants queued — often caused by same queries burning CPU |
+| `PAGEIOLATCH_SH` | If CPU is high AND this is high — missing indexes causing scans |
+
+---
+
+*Last Updated: February 2026 | SQL Server 2016 / 2017 / 2019 / 2022 / Azure SQL VM*
