@@ -1,0 +1,383 @@
+# SQL Server — IO_COMPLETION Wait Type
+
+> **Category:** I/O | **Severity:** High | **Applies To:** SQL Server 2016+, Azure SQL VM (IaaS)
+
+---
+
+## What Is IO_COMPLETION?
+
+SQL Server is waiting for an **asynchronous I/O operation to complete** — typically when reading large amounts of data from disk. The query is idle, doing nothing, just waiting for the disk to respond.
+
+Think of it like ordering food and staring at the kitchen window waiting — SQL Server sent a disk request and is now just waiting for the data to arrive.
+
+---
+
+## Step 1 — Confirm the Wait Type is Active
+
+Run this to see queries **currently** waiting on IO_COMPLETION:
+
+```sql
+SELECT 
+    r.session_id,
+    r.wait_type,
+    r.wait_time / 1000.0        AS wait_secs,
+    r.reads                      AS physical_reads,
+    r.logical_reads,
+    r.cpu_time,
+    t.text                       AS query_text
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE r.wait_type = 'IO_COMPLETION'
+ORDER BY r.wait_time DESC;
+```
+
+**What to check:**
+- `wait_secs` > 5 seconds → serious problem
+- `physical_reads` high, `logical_reads` low → data not in cache, hitting disk repeatedly
+
+---
+
+## Step 2 — Check Overall IO Wait Stats
+
+Run this to see how much IO_COMPLETION has accumulated since last SQL Server restart:
+
+```sql
+SELECT 
+    wait_type,
+    waiting_tasks_count,
+    wait_time_ms / 1000.0          AS total_wait_secs,
+    max_wait_time_ms / 1000.0      AS max_wait_secs,
+    wait_time_ms * 100.0 /
+    SUM(wait_time_ms) OVER()       AS pct_of_total_waits
+FROM sys.dm_os_wait_stats
+WHERE wait_type IN (
+    'IO_COMPLETION',
+    'ASYNC_IO_COMPLETION',
+    'PAGEIOLATCH_SH',
+    'PAGEIOLATCH_EX'
+)
+ORDER BY wait_time_ms DESC;
+```
+
+**Interpretation:**
+- IO_COMPLETION > 10% of total waits → I/O is a significant bottleneck
+- PAGEIOLATCH appearing alongside → buffer pool pressure, not enough RAM caching data
+
+---
+
+## Step 3 — Find Which Disk/File is Slow
+
+Identify exactly which database file is causing the stall:
+
+```sql
+SELECT 
+    DB_NAME(vfs.database_id)        AS database_name,
+    mf.physical_name                AS file_path,
+    mf.type_desc                    AS file_type,
+    vfs.num_of_reads,
+    vfs.num_of_writes,
+    vfs.io_stall_read_ms,
+    vfs.io_stall_write_ms,
+    CASE 
+        WHEN (vfs.num_of_reads + vfs.num_of_writes) > 0 
+        THEN vfs.io_stall / (vfs.num_of_reads + vfs.num_of_writes)
+        ELSE 0 
+    END                             AS avg_io_stall_ms
+FROM sys.dm_io_virtual_file_stats(NULL, NULL) vfs
+JOIN sys.master_files mf 
+    ON vfs.database_id = mf.database_id 
+    AND vfs.file_id = mf.file_id
+ORDER BY avg_io_stall_ms DESC;
+```
+
+**Benchmarks:**
+
+| avg_io_stall_ms | Verdict |
+|---|---|
+| < 10ms | Disk is healthy |
+| 10 – 30ms | Disk is under pressure |
+| > 30ms | **Disk is the bottleneck — action required** |
+
+---
+
+## Step 4 — Check Buffer Cache Health
+
+High physical reads often mean data is not being cached. Check memory health:
+
+```sql
+SELECT 
+    counter_name,
+    cntr_value
+FROM sys.dm_os_performance_counters
+WHERE counter_name IN (
+    'Buffer cache hit ratio',
+    'Page life expectancy',
+    'Page reads/sec',
+    'Lazy writes/sec'
+);
+```
+
+**Healthy values:**
+
+| Metric | Healthy | Problem |
+|---|---|---|
+| Buffer cache hit ratio | > 95% | < 90% = too many disk reads |
+| Page life expectancy | > 300 sec | < 300 = data evicted from memory too fast |
+| Page reads/sec | < 90 | > 90 = heavy disk reads happening |
+| Lazy writes/sec | ~0 | High = severe memory pressure |
+
+---
+
+## Step 5 — Find the Offending Queries (Historical)
+
+Find which queries have caused the most physical reads since last restart:
+
+```sql
+SELECT TOP 20
+    qs.total_physical_reads                                     AS total_physical_reads,
+    qs.total_physical_reads / qs.execution_count               AS avg_physical_reads,
+    qs.total_logical_reads  / qs.execution_count               AS avg_logical_reads,
+    qs.total_elapsed_time   / qs.execution_count / 1000        AS avg_duration_ms,
+    qs.execution_count,
+    t.text                                                      AS query_text,
+    qp.query_plan
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) t
+CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+ORDER BY qs.total_physical_reads DESC;
+```
+
+> **Tip:** Click the `query_plan` link in SSMS results to open the graphical execution plan. Look for **Table Scan** or **Clustered Index Scan** operators — these are the primary cause of excessive physical reads.
+
+---
+
+## Step 6 — Check for Missing Indexes
+
+Missing indexes force SQL Server to scan entire tables from disk instead of seeking directly to rows:
+
+```sql
+SELECT TOP 20
+    ROUND(migs.avg_total_user_cost * 
+          migs.avg_user_impact * 
+          (migs.user_seeks + migs.user_scans), 0)  AS priority_score,
+    mid.statement                                   AS table_name,
+    mid.equality_columns,
+    mid.inequality_columns,
+    mid.included_columns,
+    migs.user_seeks,
+    migs.user_scans,
+    'CREATE INDEX IX_' + 
+    REPLACE(REPLACE(mid.statement, '[', ''), ']', '') + 
+    ' ON ' + mid.statement + 
+    ' (' + ISNULL(mid.equality_columns, '') + ')' 
+    + CASE WHEN mid.included_columns IS NOT NULL 
+           THEN ' INCLUDE (' + mid.included_columns + ')' 
+           ELSE '' END                              AS suggested_index
+FROM sys.dm_db_missing_index_groups mig
+JOIN sys.dm_db_missing_index_group_stats migs 
+    ON mig.index_group_handle = migs.group_handle
+JOIN sys.dm_db_missing_index_details mid 
+    ON mig.index_handle = mid.index_handle
+ORDER BY priority_score DESC;
+```
+
+> **Note:** Higher `priority_score` = bigger impact. Focus on scores above 100,000 first.
+
+---
+
+## Step 7 — Check Index Fragmentation
+
+Fragmented indexes cause SQL Server to read more pages than necessary, increasing disk I/O:
+
+```sql
+SELECT 
+    OBJECT_NAME(ips.object_id)          AS table_name,
+    i.name                              AS index_name,
+    ips.avg_fragmentation_in_percent,
+    ips.page_count
+FROM sys.dm_db_index_physical_stats(
+    DB_ID(), NULL, NULL, NULL, 'SAMPLED') ips
+JOIN sys.indexes i 
+    ON ips.object_id = i.object_id 
+    AND ips.index_id = i.index_id
+WHERE ips.avg_fragmentation_in_percent > 10
+  AND ips.page_count > 500
+ORDER BY ips.avg_fragmentation_in_percent DESC;
+```
+
+**Action based on fragmentation level:**
+
+```sql
+-- Fragmentation between 10% - 30%: REORGANIZE (online, low impact)
+ALTER INDEX [IndexName] ON [dbo].[YourTable] REORGANIZE;
+
+-- Fragmentation > 30%: REBUILD (more thorough)
+ALTER INDEX [IndexName] ON [dbo].[YourTable] REBUILD;
+
+-- Rebuild ALL indexes on a table
+ALTER INDEX ALL ON [dbo].[YourTable] REBUILD;
+```
+
+---
+
+## Step 8 — Update Statistics
+
+Outdated statistics cause SQL Server to generate poor execution plans, often doing full scans instead of seeks:
+
+```sql
+-- Check when stats were last updated
+SELECT 
+    OBJECT_NAME(s.object_id)    AS table_name,
+    s.name                      AS stats_name,
+    sp.last_updated,
+    sp.rows,
+    sp.rows_sampled,
+    sp.modification_counter
+FROM sys.stats s
+CROSS APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) sp
+WHERE OBJECT_NAME(s.object_id) = 'YourTableName'  -- replace with your table
+ORDER BY sp.last_updated ASC;
+
+-- Update stats on a specific table with full scan
+UPDATE STATISTICS [dbo].[YourTable] WITH FULLSCAN;
+
+-- Update all stats in the database
+EXEC sp_updatestats;
+```
+
+---
+
+## Step 9 — Infrastructure Fixes (Azure SQL VM)
+
+If disk stall confirmed > 30ms in Step 3, address the storage layer:
+
+### 9.1 — Upgrade Disk Type in Azure Portal
+
+```
+Azure Portal → Virtual Machine → Disks → Click Data Disk → Change Type
+```
+
+| Disk Type | Avg Latency | Recommendation |
+|---|---|---|
+| Standard HDD | 10 – 50ms | ❌ Not suitable for SQL Server |
+| Standard SSD | 5 – 15ms | ⚠️ Dev/Test only |
+| Premium SSD | 1 – 5ms | ✅ Recommended for production |
+| Ultra Disk | < 1ms | ✅ Best for high IOPS workloads |
+
+### 9.2 — Enable Read Caching on Data Disk
+
+```
+Azure Portal → VM → Disks → Data Disk → Host Caching → Read-only
+```
+
+> ⚠️ Set log file disk caching to **None** — log writes must always go directly to disk for durability.
+
+### 9.3 — Best Practice Disk Layout for SQL VM
+
+```
+C:\  →  OS only
+D:\  →  SQL Data files (.mdf, .ndf)   [ Premium SSD | Cache: Read-only ]
+E:\  →  SQL Log files  (.ldf)         [ Premium SSD | Cache: None      ]
+F:\  →  TempDB                        [ Local SSD or Premium SSD       ]
+G:\  →  Backups                       [ Standard SSD (cost saving OK)  ]
+```
+
+### 9.4 — Increase SQL Server Max Memory
+
+More RAM = more data cached in buffer pool = fewer disk reads:
+
+```sql
+-- Check current memory settings
+SELECT 
+    physical_memory_in_use_kb / 1024    AS memory_used_mb,
+    page_fault_count
+FROM sys.dm_os_process_memory;
+
+-- Set max server memory (leave ~10% for OS)
+-- Example: 16GB RAM server → set to 14336 MB
+EXEC sp_configure 'max server memory (MB)', 14336;
+RECONFIGURE;
+```
+
+---
+
+## Step 10 — Verify Fix is Working
+
+After applying fixes, run this to confirm IO_COMPLETION waits have reduced:
+
+```sql
+-- Clear wait stats (do this BEFORE applying fix, then check again after)
+-- WARNING: This resets all historical wait stats
+DBCC SQLPERF ('sys.dm_os_wait_stats', CLEAR);
+
+-- Then after 30 minutes of normal workload, re-run:
+SELECT 
+    wait_type,
+    waiting_tasks_count,
+    wait_time_ms / 1000.0  AS total_wait_secs,
+    wait_time_ms * 100.0 /
+    SUM(wait_time_ms) OVER() AS pct_of_total
+FROM sys.dm_os_wait_stats
+WHERE wait_type = 'IO_COMPLETION'
+ORDER BY wait_time_ms DESC;
+```
+
+**Success criteria:** IO_COMPLETION drops below 5% of total wait time.
+
+---
+
+## Root Cause Decision Tree
+
+```
+IO_COMPLETION waits high?
+        │
+        ├── avg_io_stall_ms > 30ms?
+        │       └── YES → Storage problem
+        │               ├── Azure VM? → Upgrade to Premium SSD (Step 9.1)
+        │               ├── Backup on same disk? → Separate backup disk
+        │               └── Data & Log on same disk? → Separate to different disks (Step 9.3)
+        │
+        ├── Buffer Cache Hit Ratio < 90%?
+        │       └── YES → Not enough RAM
+        │               └── Increase max server memory (Step 9.4)
+        │
+        ├── High physical_reads on specific query?
+        │       └── YES → Query problem
+        │               ├── Missing index? → Create index (Step 6)
+        │               ├── Fragmented index? → Rebuild index (Step 7)
+        │               └── Outdated stats? → Update statistics (Step 8)
+        │
+        └── Backup or DBCC running?
+                └── YES → Schedule off-peak hours
+```
+
+---
+
+## Common Causes Summary
+
+| Cause | Fix | Step |
+|---|---|---|
+| Slow HDD / Standard SSD | Upgrade to Premium SSD | Step 9.1 |
+| Data & Log on same disk | Separate to different disks | Step 9.3 |
+| Not enough RAM / buffer pool | Increase max server memory | Step 9.4 |
+| Missing indexes → table scans | Create missing indexes | Step 6 |
+| Fragmented indexes | Rebuild / Reorganize indexes | Step 7 |
+| Outdated statistics | Run UPDATE STATISTICS | Step 8 |
+| Backup running on production disk | Move backup to separate disk | Step 9.3 |
+| DBCC CHECKDB during peak hours | Schedule off-peak | — |
+
+---
+
+## Related Wait Types
+
+| Wait Type | Relationship |
+|---|---|
+| `PAGEIOLATCH_SH` | Reading data pages from disk — usually appears alongside IO_COMPLETION |
+| `PAGEIOLATCH_EX` | Writing data pages to disk |
+| `ASYNC_IO_COMPLETION` | Similar to IO_COMPLETION but for background tasks |
+| `WRITELOG` | Transaction log write waits — check if log disk is also slow |
+| `BACKUPIO` | Backup I/O competing with data I/O |
+
+---
+
+*Last Updated: February 2026 | SQL Server 2016 / 2017 / 2019 / 2022 / Azure SQL VM*
