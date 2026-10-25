@@ -1,0 +1,1343 @@
+<#
+========================================================================================================================
+  BUILDER:      Build-SQLFirefightingKit.ps1
+  PRODUCT:      The SQL Server Firefighting & Triage Kit (v1.0)
+  DESCRIPTION:  Automatically creates the complete directory structure, all 30 production-ready T-SQL emergency scripts,
+                the Emergency Decision Tree, the Complete Field Manual SOP Guide, the Corporate Expense Letter,
+                and the Post-Mortem RCA Template, then packages everything into SQL-Server-Firefighting-Kit-v1.0.zip.
+========================================================================================================================
+#>
+
+$ErrorActionPreference = "Stop"
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $ScriptDir) { $ScriptDir = Get-Location }
+
+$DesktopPath = [Environment]::GetFolderPath("Desktop")
+$RootFolderName = "SQL-Server-Firefighting-Kit-v1.0"
+$BaseDir = Join-Path -Path $ScriptDir -ChildPath $RootFolderName
+$ZipFilePath = Join-Path -Path $ScriptDir -ChildPath "$RootFolderName.zip"
+
+Write-Host "Building $RootFolderName at $BaseDir..." -ForegroundColor Cyan
+
+if (Test-Path $BaseDir) { Remove-Item -Path $BaseDir -Recurse -Force }
+if (Test-Path $ZipFilePath) { Remove-Item -Path $ZipFilePath -Force }
+
+$Folders = @(
+    "00_START_HERE",
+    "01_First_60_Seconds_Triage",
+    "02_CPU_At_100_Percent",
+    "03_Blocking_And_Deadlocks",
+    "04_Memory_And_Storage_IOPS_Crisis",
+    "05_TempDB_And_Transaction_Log_Full",
+    "06_HADR_Replication_And_Corruption_Rescue",
+    "07_Post_Mortem_And_RCA_Templates"
+)
+
+foreach ($f in $Folders) {
+    New-Item -ItemType Directory -Path (Join-Path $BaseDir $f) -Force | Out-Null
+}
+
+function Write-KitFile {
+    param([string]$RelativePath, [string]$Content)
+    $FullPath = Join-Path -Path $BaseDir -ChildPath $RelativePath
+    [System.IO.File]::WriteAllText($FullPath, $Content.Trim() + [Environment]::NewLine, [System.Text.Encoding]::UTF8)
+    Write-Host "  [+] Created: $RelativePath" -ForegroundColor Green
+}
+
+# ======================================================================================================================
+# FOLDER 00: START HERE DOCUMENTS
+# ======================================================================================================================
+
+Write-KitFile "00_START_HERE\00_Emergency_Decision_Tree_Flowchart.md" @'
+# THE 60-SECOND SQL SERVER EMERGENCY DECISION TREE (v1.0)
+
+**GOLDEN RULE #1:** DO NOT RESTART THE SQL SERVER SERVICE BEFORE RUNNING SCRIPT #01. Restarting clears DMVs, destroys forensic evidence, and triggers long crash recovery/rollback loops.  
+**GOLDEN RULE #2:** Always start by running `01_First_60_Seconds_Triage.sql`, inspect Result Set 1 (`[Triage_Verdict]`) and Result Set 4 (`[Wait_Category]`), then follow the matching branch below:
+
+```text
+                        +----------------------------------------------+
+                        |     ALERT FIRES / APP TIMEOUTS REPORTED      |
+                        |      Run: 01_First_60_Seconds_Triage.sql     |
+                        +----------------------+-----------------------+
+                                               |
+        +------------------+-------------------+-------------------+------------------+
+        |                  |                   |                   |                  |
+        v                  v                   v                   v                  v
+  [Blocked >= 5]     [SQL CPU > 85%]   [Mem Grants > 0]   [TempDB Used > 85%]  [Disk/Log Waits]
+  Wait: LCK_M_*      Wait: SOS_SCHED   Wait: RESOURCE_    Error 1101 / 1105    Wait: WRITELOG /
+                           CXPACKET          SEMAPHORE     or Error 9002        PAGEIOLATCH_*
+        |                  |                   |                   |                  |
+        v                  v                   v                   v                  v
+  BRANCH A:          BRANCH B:           BRANCH C:           BRANCH D:          BRANCH E:
+  Folder 03          Folder 02           Script #14 & #15    Folder 05          Script #16 & #17
+```
+
+---
+
+## Quick Symptom-to-Script Lookup Matrix
+
+| Emergency Symptom | Primary Script to Run Immediately | Secondary Follow-Up Script |
+| :--- | :--- | :--- |
+| **"Everything is hung / timing out!"** | `01_First_60_Seconds_Triage.sql` | `02_Server_Vital_Signs_Dashboard.sql` |
+| **CPU Pinned at 90% - 100%** | `04_Top_Active_CPU_Burners_Live.sql` | `06_Parameter_Sniffing_Detector_And_Fix.sql` |
+| **Severe Blocking Pile-Up** | `09_Lead_Blocker_Tree_And_Kill_Generator.sql` | `10_Open_Sleeping_Transactions_With_Locks.sql` |
+| **Deadlock Errors (Error 1205)** | `12_SystemHealth_Deadlock_XML_Decoder.sql` | `11_Live_Lock_Escalation_And_Waiters.sql` |
+| **Queries Waiting on Memory (RESOURCE_SEMAPHORE)** | `15_Memory_Grant_Pending_Queue_Rescue.sql` | `14_PLE_And_Memory_Clerk_Hog_Analyzer.sql` |
+| **Disk Latency / Storage Thrashing** | `16_Disk_Latency_Stall_By_Database_File.sql` | `17_Top_Physical_IO_Thrashing_Queries.sql` |
+| **TempDB Full (Error 1101 / 1105)** | `19_TempDB_Space_Hog_By_Session_And_Task.sql` | `20_Version_Store_Runaway_Transaction_Finder.sql` |
+| **Transaction Log Full (Error 9002)** | `22_Transaction_Log_Full_Why_Wont_It_Truncate.sql` | `24_Long_Running_Uncommitted_Transaction_Sniper.sql` |
+| **Always On AG Synchronization Lag** | `25_AlwaysOn_AG_Redo_And_Send_Queue_Lag.sql` | `16_Disk_Latency_Stall_By_Database_File.sql` |
+| **Corruption Alert (Error 823 / 824 / 825)** | `26_Suspect_Pages_And_I_O_Error_Detector.sql` | `03_Recent_ErrorLog_Critical_Scanner.sql` |
+'@
+
+Write-KitFile "00_START_HERE\01_The_SQL_Firefighting_Field_Manual.md" @'
+# THE SQL SERVER FIREFIGHTING & TRIAGE FIELD MANUAL (v1.0)
+### Complete Standard Operating Procedures (SOPs) for Production Database Outages
+
+---
+
+## SECTION 1: THE 5 GOLDEN RULES OF PRODUCTION DBA TRIAGE
+
+1. **Observe Before You Act:**  
+   Always run `01_First_60_Seconds_Triage.sql` and save the output before killing sessions or clearing caches so you have forensic proof for the Root Cause Analysis (RCA).
+
+2. **Never Flush the Entire Plan Cache on a Busy Server:**  
+   Never run `DBCC FREEPROCCACHE` unfiltered during peak load. Always pass the specific `plan_handle` generated by Script #06 or Script #04 (e.g., `DBCC FREEPROCCACHE(0x06000...)`).
+
+3. **Never Run DBCC SHRINKDATABASE During an Outage:**  
+   Shrinking data files causes massive index fragmentation, burns I/O, generates huge log activity, and blocks user queries.
+
+4. **Check Rollback Impact Before Running KILL:**  
+   Killing a `SELECT` query finishes immediately. Killing a `DELETE` or `UPDATE` that has been writing for 45 minutes will trigger a single-threaded rollback that holds exclusive locks the entire time. Check Script #28 to monitor rollback ETA.
+
+5. **Communicate Every 15 Minutes:**  
+   Post crisp, metrics-backed updates in your incident bridge channel using the outputs of these diagnostic scripts.
+
+---
+
+## SECTION 2: FOLDER-BY-FOLDER STANDARD OPERATING PROCEDURES (SOPs)
+
+### Folder 01: First 60 Seconds Triage (Scripts #01 - #03)
+* **`01_First_60_Seconds_Triage.sql`**: Run first in every incident. Check Result Set 1 `[Triage_Verdict]` for automated diagnosis, Result Set 2 for Lead Blockers (`blocking_session_id = 0`), Result Set 3 for the top 15 active queries, and Result Set 4 for wait bottlenecks.
+* **`02_Server_Vital_Signs_Dashboard.sql`**: Checks server uptime (did it just reboot?), OS memory state (is Windows paging?), Max Server Memory vs. physical RAM, MAXDOP, and a 30-minute minute-by-minute CPU history from the ring buffer.
+* **`03_Recent_ErrorLog_Critical_Scanner.sql`**: Scans the last 24 hours of the SQL Server Error Log in milliseconds without hanging SSMS. Flags corruption (823/824/825), 15-second I/O warnings, Error 9002 (Log Full), deadlocks, and login storms (Error 18456).
+
+### Folder 02: CPU at 100% (Scripts #04 - #08)
+* **`04_Top_Active_CPU_Burners_Live.sql`**: Ranks currently executing requests by CPU time, logical reads, parallelism (`dop`), and plan cost, and provides the exact single-plan `DBCC FREEPROCCACHE(plan_handle)` command.
+* **`05_Implicit_Conversion_And_Scan_Hunter.sql`**: Scans the plan cache for high-CPU queries suffering from `CONVERT_IMPLICIT` (e.g., comparing VARCHAR columns to NVARCHAR parameters) or high-cost Index/Table Scans.
+* **`06_Parameter_Sniffing_Detector_And_Fix.sql`**: Identifies stored procedures and parameterized queries with extreme variance between min and max logical reads or worker time, and generates targeted plan eviction and `OPTION (RECOMPILE)` fixes.
+* **`07_High_Compilation_And_AdHoc_Flood.sql`**: Checks single-use ad-hoc plan cache bloat (MB wasted by `usecounts = 1` plans) and generates the exact command to enable `optimize for ad hoc workloads`.
+* **`08_Scheduler_Run_Queue_Pressure.sql`**: Inspects `sys.dm_os_schedulers` (`runnable_tasks_count` and `work_queue_count`) across NUMA nodes to prove thread starvation and CPU queue depth.
+
+### Folder 03: Blocking & Deadlocks (Scripts #09 - #13)
+* **`09_Lead_Blocker_Tree_And_Kill_Generator.sql`**: Recursive CTE that maps the full visual blocking tree (Level 0 Root -> Level 1 -> Level 2), shows exact lock modes held, and outputs ready-to-run `KILL` commands for root blockers.
+* **`10_Open_Sleeping_Transactions_With_Locks.sql`**: Catches the #1 silent killer in OLTP databases: sessions in `sleeping` status (`open_transaction_count > 0`) that opened a `BEGIN TRAN` minutes or hours ago and never committed, along with their last executed SQL text and locked objects.
+* **`11_Live_Lock_Escalation_And_Waiters.sql`**: Queries `sys.dm_tran_locks` to show which specific tables/indexes have OBJECT or PAGE level exclusive locks and which sessions are waiting on them.
+* **`12_SystemHealth_Deadlock_XML_Decoder.sql`**: Automatically extracts recent Deadlock Graphs (`xml_deadlock_report`) directly from the built-in `system_health` Extended Events session—no trace flags required.
+* **`13_Application_Connection_Pool_Storm_Check.sql`**: Groups all connections by `host_name`, `program_name`, and `login_name` to identify microservice connection leaks, maxed-out connection pools, and `ASYNC_NETWORK_IO` stalls.
+
+### Folder 04: Memory & Storage IOPS Crisis (Scripts #14 - #18)
+* **`14_PLE_And_Memory_Clerk_Hog_Analyzer.sql`**: Evaluates Page Life Expectancy (PLE) per NUMA node and breaks down `sys.dm_os_memory_clerks` to reveal if Buffer Pool, Plan Cache, or CLR/XTP is consuming RAM.
+* **`15_Memory_Grant_Pending_Queue_Rescue.sql`**: Queries `sys.dm_exec_query_memory_grants` during `RESOURCE_SEMAPHORE` crises to show which active queries are hoarding gigabytes of workspace RAM and which queries are stuck waiting in the queue.
+* **`16_Disk_Latency_Stall_By_Database_File.sql`**: Calculates read latency (ms), write latency (ms), and MB/sec throughput per database file (`.mdf`, `.ndf`, `.ldf`) using `sys.dm_io_virtual_file_stats`.
+* **`17_Top_Physical_IO_Thrashing_Queries.sql`**: Identifies active and cached queries driving the highest physical disk reads and writes (`PAGEIOLATCH_SH` / `PAGEIOLATCH_EX`), alongside missing index suggestions.
+* **`18_Buffer_Pool_Dirty_Page_Usage_By_DB.sql`**: Shows exact RAM (MB and %) consumed in the Buffer Pool by each database, including `Dirty_Pages_MB` waiting to be flushed by CHECKPOINT.
+
+### Folder 05: TempDB & Transaction Log Full (Scripts #19 - #24)
+* **`19_TempDB_Space_Hog_By_Session_And_Task.sql`**: Breaks down TempDB usage into User Objects (#temp tables), Internal Objects (Sort/Hash spills), and Version Store, then ranks sessions consuming the most TempDB MB right now.
+* **`20_Version_Store_Runaway_Transaction_Finder.sql`**: Finds the exact session holding open the oldest Snapshot / RCSI transaction that is preventing the TempDB Version Store from cleaning up.
+* **`21_TempDB_PAGELATCH_Contention_Check.sql`**: Detects in-memory allocation bitmap contention (PFS, GAM, SGAM pages `2:1:1`, `2:1:2`, `2:1:3`) and checks if TempDB data files are equally sized.
+* **`22_Transaction_Log_Full_Why_Wont_It_Truncate.sql`**: Inspects `sys.dm_db_log_space_usage` and `log_reuse_wait_desc` across all databases and prescribes the exact action for `LOG_BACKUP`, `ACTIVE_TRANSACTION`, or `AVAILABILITY_REPLICA`.
+* **`23_Active_VLF_Count_And_Safe_Shrink_Generator.sql`**: Counts Virtual Log Files (VLFs) per database using `sys.dm_db_log_info` (detects VLF fragmentation > 1,000 VLFs) and outputs safe log management commands.
+* **`24_Long_Running_Uncommitted_Transaction_Sniper.sql`**: Queries `sys.dm_tran_database_transactions` and `sys.dm_tran_active_transactions` to show how many megabytes of Transaction Log records each open transaction has generated.
+
+### Folder 06: HADR, Replication & Corruption Rescue (Scripts #25 - #28)
+* **`25_AlwaysOn_AG_Redo_And_Send_Queue_Lag.sql`**: Calculates Send Queue (KB), Redo Queue (KB), estimated recovery time (seconds), and commit lag across all Always On Availability Group replicas.
+* **`26_Suspect_Pages_And_I_O_Error_Detector.sql`**: Queries `msdb.dbo.suspect_pages` and resolves any corrupted `file_id` + `page_id` into the exact Database, Schema, Table, and Index ID so you know if a simple Index Rebuild can fix it.
+* **`27_Backup_And_Restore_ETA_Progress_Tracker.sql`**: Tracks `percent_complete`, elapsed time, estimated completion time (ETA), and throughput (MB/sec) for running BACKUP, RESTORE, DBCC CHECKDB, and SHRINK commands.
+* **`28_Ghost_Cleanup_And_Rollback_Progress_Tracker.sql`**: Monitors sessions in `KILLED/ROLLBACK` status so you can give management an accurate ETA on when a killed transaction will finish rolling back.
+
+### Folder 07: Post-Mortem & RCA Templates (Scripts #29 - #30 + RCA Doc)
+* **`29_Query_Store_Regression_Time_Machine.sql`**: Queries `sys.query_store_runtime_stats` over the last 24 hours to find queries with multiple plans where a new plan regressed CPU/duration, and generates the exact `sp_query_store_force_plan` command.
+* **`30_Wait_Stats_Delta_60_Second_Sampler.sql`**: Captures a clean 10-second live delta of `sys.dm_os_wait_stats` (filtering out 90+ benign background sleeps) to prove what the server is waiting on right now—not cumulative stats since last reboot.
+* **`Incident_Post_Mortem_RCA_Template.md`**: Standardized Root Cause Analysis document for enterprise stakeholders and post-incident reviews.
+'@
+
+Write-KitFile "00_START_HERE\02_Corporate_Expense_Reimbursement_Letter.txt" @'
+Subject: Learning & Tooling Reimbursement Request — SQL Server Incident Triage Toolkit ($79)
+
+Hi [Manager's Name],
+
+I would like to request approval to expense The SQL Server Firefighting & Triage Kit ($79) under our team's technical tooling / professional development budget.
+
+It is a library of 30 read-only production diagnostic T-SQL scripts and Standard Operating Procedures (SOPs) built specifically for live SQL Server incident response (100% CPU spikes, blocking chains, deadlocks, memory grant starvation, TempDB exhaustion, and Always On lag).
+
+Having these pre-vetted triage scripts, decision trees, and post-mortem RCA templates ready will significantly reduce our Mean Time to Resolution (MTTR) during production database alerts and standardize how our team diagnoses outages.
+
+Please let me know if I have the green light to expense this.
+
+Thanks,
+[Your Name]
+'@
+
+# ======================================================================================================================
+# FOLDER 01: FIRST 60 SECONDS TRIAGE (SCRIPTS 01 - 03)
+# ======================================================================================================================
+Write-KitFile "01_First_60_Seconds_Triage\01_First_60_Seconds_Triage.sql" @'
+/*========================================================================================================================
+SCRIPT:       01_First_60_Seconds_Triage.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Instant, zero-impact triage snapshot during a live production incident (4 Diagnostic Result Sets).
+SAFETY:       100% Read-Only. Uses READ UNCOMMITTED & 2-second Lock Timeout.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 2000;
+SET DEADLOCK_PRIORITY LOW;
+
+DECLARE @SQLCpu INT, @OtherCpu INT, @PageLifeExpectancy INT, @MemGrantsPending INT;
+DECLARE @TempDBFreeMB DECIMAL(18,2), @TempDBPctUsed DECIMAL(5,2);
+DECLARE @ActiveUserReq INT, @BlockedReq INT, @OpenTranSleeping INT;
+
+SELECT TOP (1)
+    @SQLCpu   = record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int'),
+    @OtherCpu = 100 - record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int')
+                - record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int')
+FROM (
+    SELECT CAST(record AS XML) AS record
+    FROM sys.dm_os_ring_buffers
+    WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR' AND record LIKE N'%<Record%'
+) AS x
+ORDER BY record.value('(./Record/@id)[1]', 'int') DESC;
+
+SELECT @PageLifeExpectancy = AVG(CAST(cntr_value AS BIGINT))
+FROM sys.dm_os_performance_counters
+WHERE object_name LIKE N'%Buffer Manager%' AND RTRIM(counter_name) = N'Page life expectancy';
+
+SELECT @MemGrantsPending = SUM(CAST(cntr_value AS INT))
+FROM sys.dm_os_performance_counters
+WHERE object_name LIKE N'%Memory Manager%' AND RTRIM(counter_name) = N'Memory Grants Pending';
+
+SELECT
+    @TempDBFreeMB  = SUM(unallocated_extent_page_count) * 8.0 / 1024.0,
+    @TempDBPctUsed = CAST((1.0 - (SUM(unallocated_extent_page_count) * 1.0 / NULLIF(SUM(total_page_count), 0))) * 100.0 AS DECIMAL(5,2))
+FROM tempdb.sys.dm_db_file_space_usage;
+
+SELECT
+    @ActiveUserReq = COUNT(*),
+    @BlockedReq    = SUM(CASE WHEN blocking_session_id > 0 THEN 1 ELSE 0 END)
+FROM sys.dm_exec_requests r
+INNER JOIN sys.dm_exec_sessions s ON r.session_id = s.session_id
+WHERE s.is_user_process = 1 AND r.session_id <> @@SPID;
+
+SELECT @OpenTranSleeping = COUNT(*)
+FROM sys.dm_exec_sessions
+WHERE is_user_process = 1 AND status = N'sleeping' AND open_transaction_count > 0;
+
+-- RESULT SET 1: SERVER VITAL SIGNS
+SELECT
+    @@SERVERNAME AS [Server_Name],
+    CONVERT(VARCHAR(19), GETDATE(), 120) AS [Snapshot_Time],
+    ISNULL(@SQLCpu, -1) AS [SQL_CPU_Pct],
+    ISNULL(@OtherCpu, -1) AS [Non_SQL_CPU_Pct],
+    @ActiveUserReq AS [Active_Requests],
+    ISNULL(@BlockedReq, 0) AS [Blocked_Sessions],
+    @OpenTranSleeping AS [Sleeping_With_Open_Tran],
+    ISNULL(@MemGrantsPending, 0) AS [Mem_Grants_Pending],
+    @PageLifeExpectancy AS [PLE_Seconds],
+    @TempDBPctUsed AS [TempDB_Used_Pct],
+    @TempDBFreeMB AS [TempDB_Free_MB],
+    CASE
+        WHEN ISNULL(@BlockedReq, 0) >= 5 THEN N'CRITICAL: Severe Blocking Chain -> Check Result Set 2 & Script #09'
+        WHEN ISNULL(@MemGrantsPending, 0) > 0 THEN N'CRITICAL: Memory Grant Queueing -> Run Script #15'
+        WHEN @TempDBPctUsed >= 85.0 THEN N'CRITICAL: TempDB Filling Up (>85%) -> Run Script #19'
+        WHEN ISNULL(@SQLCpu, 0) >= 85 THEN N'WARNING: High SQL CPU (>85%) -> Run Script #04'
+        WHEN ISNULL(@OtherCpu, 0) >= 25 THEN N'WARNING: Non-SQL OS Process Eating CPU -> Check Windows Task Manager'
+        WHEN @OpenTranSleeping > 0 THEN N'WARNING: Sleeping Sessions Holding Open Transactions -> Run Script #10'
+        ELSE N'OK: No Global Threshold Breached -> Review Result Set 3 & 4'
+    END AS [Triage_Verdict];
+
+-- RESULT SET 2: LEAD BLOCKERS
+;WITH BlockingHierarchy AS (
+    SELECT
+        s.session_id, ISNULL(r.blocking_session_id, 0) AS blocking_session_id,
+        s.login_name, s.host_name, s.program_name, s.status AS session_status,
+        s.open_transaction_count, r.wait_type, r.wait_time / 1000.0 AS wait_sec,
+        DB_NAME(COALESCE(r.database_id, s.database_id)) AS database_name,
+        COALESCE(r.sql_handle, c.most_recent_sql_handle) AS sql_handle
+    FROM sys.dm_exec_sessions s
+    LEFT JOIN sys.dm_exec_requests r ON s.session_id = r.session_id
+    LEFT JOIN sys.dm_exec_connections c ON s.session_id = c.session_id
+    WHERE s.is_user_process = 1
+)
+SELECT
+    b.session_id AS [Lead_Blocker_SPID],
+    b.session_status AS [Status],
+    COUNT(v.session_id) AS [Direct_Blocked_Victims],
+    b.open_transaction_count AS [Open_Trans],
+    b.database_name AS [DB_Name],
+    b.login_name AS [Login],
+    b.host_name AS [Host],
+    b.program_name AS [Application],
+    ISNULL(b.wait_type, N'IDLE / AWAITING_CLIENT_CMD') AS [Current_Wait],
+    SUBSTRING(st.text, 1, 400) AS [Lead_Blocker_SQL_Snippet],
+    N'KILL ' + CAST(b.session_id AS NVARCHAR(10)) + N';' AS [Emergency_Kill_Cmd]
+FROM BlockingHierarchy b
+INNER JOIN BlockingHierarchy v ON b.session_id = v.blocking_session_id
+OUTER APPLY sys.dm_exec_sql_text(b.sql_handle) st
+WHERE b.blocking_session_id = 0
+GROUP BY b.session_id, b.session_status, b.open_transaction_count, b.database_name,
+         b.login_name, b.host_name, b.program_name, b.wait_type, SUBSTRING(st.text, 1, 400)
+ORDER BY [Direct_Blocked_Victims] DESC;
+
+-- RESULT SET 3: TOP 15 ACTIVE QUERIES
+;WITH TempDBTaskUsage AS (
+    SELECT session_id,
+        SUM(internal_objects_alloc_page_count + user_objects_alloc_page_count
+        - internal_objects_dealloc_page_count - user_objects_dealloc_page_count) * 8.0 / 1024.0 AS Net_TempDB_MB
+    FROM sys.dm_db_task_space_usage GROUP BY session_id
+)
+SELECT TOP (15)
+    r.session_id AS [SPID], r.blocking_session_id AS [Blocked_By],
+    CAST(r.total_elapsed_time / 1000.0 AS DECIMAL(12,1)) AS [Duration_Sec],
+    r.status AS [Status], r.command AS [Command_Type], DB_NAME(r.database_id) AS [Database_Name],
+    ISNULL(r.wait_type, N'-- ON CPU --') AS [Current_Wait_Type],
+    CAST(r.cpu_time / 1000.0 AS DECIMAL(12,1)) AS [CPU_Sec],
+    r.logical_reads AS [Logical_Reads], r.reads AS [Physical_Reads], r.writes AS [Writes],
+    CAST(ISNULL(t.Net_TempDB_MB, 0) AS DECIMAL(12,2)) AS [Active_TempDB_MB],
+    s.open_transaction_count AS [Open_Trans], s.login_name AS [Login_Name],
+    s.host_name AS [Host_Name], s.program_name AS [Program_Name],
+    SUBSTRING(st.text, (r.statement_start_offset / 2) + 1,
+        ((CASE r.statement_end_offset WHEN -1 THEN DATALENGTH(st.text) ELSE r.statement_end_offset END - r.statement_start_offset) / 2) + 1
+    ) AS [Executing_Statement_Text],
+    qp.query_plan AS [Click_For_XML_Plan]
+FROM sys.dm_exec_requests r
+INNER JOIN sys.dm_exec_sessions s ON r.session_id = s.session_id
+LEFT JOIN TempDBTaskUsage t ON r.session_id = t.session_id
+OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) st
+OUTER APPLY sys.dm_exec_query_plan(r.plan_handle) qp
+WHERE s.is_user_process = 1 AND r.session_id <> @@SPID
+ORDER BY r.total_elapsed_time DESC, r.cpu_time DESC;
+
+-- RESULT SET 4: LIVE WAIT SUMMARY
+SELECT
+    ISNULL(r.wait_type, N'ON_CPU_EXECUTING') AS [Wait_Category],
+    COUNT(*) AS [Waiting_Session_Count],
+    CAST(AVG(r.wait_time / 1000.0) AS DECIMAL(12,2)) AS [Avg_Wait_Sec],
+    CAST(MAX(r.wait_time / 1000.0) AS DECIMAL(12,2)) AS [Max_Wait_Sec]
+FROM sys.dm_exec_requests r
+INNER JOIN sys.dm_exec_sessions s ON r.session_id = s.session_id
+WHERE s.is_user_process = 1 AND r.session_id <> @@SPID
+GROUP BY r.wait_type
+ORDER BY [Waiting_Session_Count] DESC;
+'@
+
+Write-KitFile "01_First_60_Seconds_Triage\02_Server_Vital_Signs_Dashboard.sql" @'
+/*========================================================================================================================
+SCRIPT:       02_Server_Vital_Signs_Dashboard.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Instance Config Sanity Check, OS Memory State, 30-Min CPU Timeline, and Database State Check.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 2000;
+
+DECLARE @StartTime DATETIME, @UptimeHours DECIMAL(10,1);
+DECLARE @TotalOSRamMB DECIMAL(18,1), @AvailOSRamMB DECIMAL(18,1), @OSMemState NVARCHAR(120);
+DECLARE @SqlCommittedMB DECIMAL(18,1), @SqlTargetMB DECIMAL(18,1);
+
+SELECT @StartTime = sqlserver_start_time,
+       @UptimeHours = DATEDIFF(MINUTE, sqlserver_start_time, GETDATE()) / 60.0,
+       @SqlCommittedMB = committed_kb / 1024.0,
+       @SqlTargetMB = committed_target_kb / 1024.0
+FROM sys.dm_os_sys_info;
+
+SELECT @TotalOSRamMB = total_physical_memory_kb / 1024.0,
+       @AvailOSRamMB = available_physical_memory_kb / 1024.0,
+       @OSMemState   = system_memory_state_desc
+FROM sys.dm_os_sys_memory;
+
+SELECT
+    @@SERVERNAME AS [Server_Name],
+    CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(50)) AS [Product_Version],
+    CAST(SERVERPROPERTY('Edition') AS NVARCHAR(100)) AS [Edition],
+    @StartTime AS [Last_Startup_Time],
+    @UptimeHours AS [Uptime_Hours],
+    osi.cpu_count AS [Logical_CPUs],
+    @TotalOSRamMB AS [Total_OS_RAM_MB],
+    @AvailOSRamMB AS [Available_OS_RAM_MB],
+    @OSMemState AS [OS_Memory_State],
+    @SqlCommittedMB AS [SQL_Committed_RAM_MB],
+    CAST(cfg_maxmem.value_in_use AS INT) AS [Configured_Max_Server_Mem_MB],
+    CAST(cfg_maxdop.value_in_use AS INT) AS [Configured_MAXDOP],
+    CAST(cfg_ctp.value_in_use AS INT) AS [Cost_Threshold_Parallelism]
+FROM sys.dm_os_sys_info osi
+CROSS JOIN (SELECT value_in_use FROM sys.configurations WHERE name = N'max server memory (MB)') cfg_maxmem
+CROSS JOIN (SELECT value_in_use FROM sys.configurations WHERE name = N'max degree of parallelism') cfg_maxdop
+CROSS JOIN (SELECT value_in_use FROM sys.configurations WHERE name = N'cost threshold for parallelism') cfg_ctp;
+
+-- RESULT SET 2: 30-MINUTE CPU TIMELINE
+DECLARE @ts_now BIGINT;
+SELECT @ts_now = cpu_ticks / (cpu_ticks / ms_ticks) FROM sys.dm_os_sys_info;
+
+SELECT TOP (30)
+    CONVERT(VARCHAR(19), DATEADD(ms, -1 * (@ts_now - [timestamp]), GETDATE()), 120) AS [Event_Time],
+    SQLProcessUtilization AS [SQL_Server_CPU_Pct],
+    100 - SystemIdle - SQLProcessUtilization AS [Non_SQL_OS_CPU_Pct],
+    SystemIdle AS [Idle_CPU_Pct],
+    REPLICATE(N'#', SQLProcessUtilization / 5) AS [SQL_CPU_Visual_Bar]
+FROM (
+    SELECT
+        record.value('(./Record/@id)[1]', 'int') AS record_id,
+        record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') AS [SystemIdle],
+        record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int') AS [SQLProcessUtilization],
+        [timestamp]
+    FROM (
+        SELECT [timestamp], CONVERT(XML, record) AS [record]
+        FROM sys.dm_os_ring_buffers
+        WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR' AND record LIKE N'%<Record%'
+    ) AS x
+) AS y
+ORDER BY record_id DESC;
+
+-- RESULT SET 3: DATABASE HEALTH
+SELECT
+    d.database_id, d.name AS [Database_Name], d.state_desc AS [DB_State],
+    d.user_access_desc AS [Access_Mode], d.recovery_model_desc AS [Recovery_Model],
+    d.log_reuse_wait_desc AS [Log_Reuse_Wait], d.is_auto_close_on, d.is_auto_shrink_on
+FROM sys.databases d
+ORDER BY CASE WHEN d.state_desc <> N'ONLINE' THEN 0 ELSE 1 END, d.name;
+'@
+
+Write-KitFile "01_First_60_Seconds_Triage\03_Recent_ErrorLog_Critical_Scanner.sql" @'
+/*========================================================================================================================
+SCRIPT:       03_Recent_ErrorLog_Critical_Scanner.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Fast scan of SQL Server Error Log (Last 24 Hours) for critical outages without freezing SSMS.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+DECLARE @StartTime DATETIME = DATEADD(HOUR, -24, GETDATE());
+DECLARE @EndTime   DATETIME = GETDATE();
+
+IF OBJECT_ID('tempdb..#RawErrorLog') IS NOT NULL DROP TABLE #RawErrorLog;
+CREATE TABLE #RawErrorLog (LogDate DATETIME, ProcessInfo NVARCHAR(100), ErrorText NVARCHAR(MAX));
+
+INSERT INTO #RawErrorLog (LogDate, ProcessInfo, ErrorText)
+EXEC sys.xp_readerrorlog 0, 1, NULL, NULL, @StartTime, @EndTime, N'desc';
+
+DELETE FROM #RawErrorLog
+WHERE ErrorText LIKE N'Log was backed up.%'
+   OR ErrorText LIKE N'Database backed up.%'
+   OR ErrorText LIKE N'BACKUP DATABASE successfully%'
+   OR ErrorText LIKE N'DBCC CHECKDB%found 0 errors%';
+
+SELECT TOP (100)
+    CONVERT(VARCHAR(19), LogDate, 120) AS [Log_Timestamp],
+    ProcessInfo AS [Source],
+    ErrorText AS [Raw_Error_Message]
+FROM #RawErrorLog
+WHERE ErrorText LIKE N'%Error:%' OR ErrorText LIKE N'%corrupt%' OR ErrorText LIKE N'%longer than 15 seconds%'
+   OR ErrorText LIKE N'%full%' OR ErrorText LIKE N'%Stack Dump%' OR ErrorText LIKE N'%deadlock%'
+   OR ErrorText LIKE N'%Availability Group%' OR ErrorText LIKE N'%failover%' OR ErrorText LIKE N'%Login failed%'
+ORDER BY LogDate DESC;
+
+SELECT TOP (25)
+    COUNT(*) AS [Occurrence_Count],
+    CONVERT(VARCHAR(19), MIN(LogDate), 120) AS [First_Seen],
+    CONVERT(VARCHAR(19), MAX(LogDate), 120) AS [Last_Seen],
+    LEFT(ErrorText, 200) AS [Error_Pattern_Summary]
+FROM #RawErrorLog
+GROUP BY LEFT(ErrorText, 200)
+HAVING COUNT(*) >= 2
+ORDER BY [Occurrence_Count] DESC;
+
+DROP TABLE #RawErrorLog;
+'@
+
+# ======================================================================================================================
+# FOLDER 02: CPU AT 100 PERCENT (SCRIPTS 04 - 08)
+# ======================================================================================================================
+Write-KitFile "02_CPU_At_100_Percent\04_Top_Active_CPU_Burners_Live.sql" @'
+/*========================================================================================================================
+SCRIPT:       04_Top_Active_CPU_Burners_Live.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Identifies active sessions burning the most CPU right now + single-plan cache eviction command.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT TOP (20)
+    r.session_id AS [SPID],
+    r.status AS [Status],
+    CAST(r.cpu_time / 1000.0 AS DECIMAL(12,2)) AS [CPU_Time_Sec],
+    CAST(r.total_elapsed_time / 1000.0 AS DECIMAL(12,2)) AS [Elapsed_Sec],
+    r.logical_reads AS [Logical_Reads],
+    r.dop AS [Parallel_DOP],
+    ISNULL(r.wait_type, N'ON_CPU') AS [Wait_Type],
+    DB_NAME(r.database_id) AS [DB_Name],
+    s.login_name,
+    s.host_name,
+    s.program_name,
+    SUBSTRING(st.text, (r.statement_start_offset / 2) + 1,
+        ((CASE r.statement_end_offset WHEN -1 THEN DATALENGTH(st.text) ELSE r.statement_end_offset END - r.statement_start_offset) / 2) + 1
+    ) AS [Active_SQL_Statement],
+    qp.query_plan AS [Execution_Plan_XML],
+    N'DBCC FREEPROCCACHE (' + CONVERT(NVARCHAR(128), r.plan_handle, 1) + N');' AS [Evict_Single_Bad_Plan_Cmd]
+FROM sys.dm_exec_requests r
+INNER JOIN sys.dm_exec_sessions s ON r.session_id = s.session_id
+OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) st
+OUTER APPLY sys.dm_exec_query_plan(r.plan_handle) qp
+WHERE s.is_user_process = 1 AND r.session_id <> @@SPID
+ORDER BY r.cpu_time DESC, r.logical_reads DESC;
+'@
+
+Write-KitFile "02_CPU_At_100_Percent\05_Implicit_Conversion_And_Scan_Hunter.sql" @'
+/*========================================================================================================================
+SCRIPT:       05_Implicit_Conversion_And_Scan_Hunter.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Finds top CPU-burning cached plans containing CONVERT_IMPLICIT warnings or Missing Index warnings.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT TOP (25)
+    DB_NAME(CAST(pa.value AS INT)) AS [Database_Name],
+    qs.execution_count AS [Executions],
+    CAST(qs.total_worker_time / 1000.0 / NULLIF(qs.execution_count, 0) AS DECIMAL(14,2)) AS [Avg_CPU_ms],
+    CAST(qs.total_worker_time / 1000000.0 AS DECIMAL(14,2)) AS [Total_CPU_Sec],
+    qs.total_logical_reads / NULLIF(qs.execution_count, 0) AS [Avg_Logical_Reads],
+    CASE WHEN CAST(qp.query_plan AS NVARCHAR(MAX)) LIKE N'%CONVERT_IMPLICIT%' THEN N'YES - Implicit Conversion!' ELSE N'No' END AS [Has_Implicit_Conversion],
+    CASE WHEN CAST(qp.query_plan AS NVARCHAR(MAX)) LIKE N'%MissingIndexes%' THEN N'YES - Missing Index!' ELSE N'No' END AS [Has_Missing_Index],
+    SUBSTRING(st.text, 1, 500) AS [Query_Text_Snippet],
+    qp.query_plan AS [Click_For_XML_Plan]
+FROM (
+    SELECT TOP (100) *
+    FROM sys.dm_exec_query_stats
+    ORDER BY total_worker_time DESC
+) qs
+OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+OUTER APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+OUTER APPLY sys.dm_exec_plan_attributes(qs.plan_handle) pa
+WHERE pa.attribute = N'dbid'
+  AND (
+    CAST(qp.query_plan AS NVARCHAR(MAX)) LIKE N'%CONVERT_IMPLICIT%'
+    OR CAST(qp.query_plan AS NVARCHAR(MAX)) LIKE N'%MissingIndexes%'
+  )
+ORDER BY qs.total_worker_time DESC;
+'@
+
+Write-KitFile "02_CPU_At_100_Percent\06_Parameter_Sniffing_Detector_And_Fix.sql" @'
+/*========================================================================================================================
+SCRIPT:       06_Parameter_Sniffing_Detector_And_Fix.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Detects cached queries with massive variance between Min and Max CPU/Reads (classic Parameter Sniffing).
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT TOP (25)
+    DB_NAME(st.dbid) AS [Database_Name],
+    OBJECT_NAME(st.objectid, st.dbid) AS [Proc_Name],
+    qs.execution_count AS [Executions],
+    qs.min_logical_reads AS [Min_Reads],
+    qs.max_logical_reads AS [Max_Reads],
+    CAST(qs.min_worker_time / 1000.0 AS DECIMAL(14,2)) AS [Min_CPU_ms],
+    CAST(qs.max_worker_time / 1000.0 AS DECIMAL(14,2)) AS [Max_CPU_ms],
+    CAST(qs.last_worker_time / 1000.0 AS DECIMAL(14,2)) AS [Last_CPU_ms],
+    SUBSTRING(st.text, 1, 400) AS [Query_Snippet],
+    qp.query_plan AS [Plan_XML],
+    N'DBCC FREEPROCCACHE (' + CONVERT(NVARCHAR(128), qs.plan_handle, 1) + N');' AS [Targeted_Plan_Flush_Cmd]
+FROM sys.dm_exec_query_stats qs
+OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+OUTER APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+WHERE qs.execution_count > 10
+  AND qs.max_logical_reads > (qs.min_logical_reads * 50)
+  AND qs.max_worker_time > 100000 -- >100ms max CPU
+ORDER BY (qs.max_worker_time - qs.min_worker_time) DESC;
+'@
+
+Write-KitFile "02_CPU_At_100_Percent\07_High_Compilation_And_AdHoc_Flood.sql" @'
+/*========================================================================================================================
+SCRIPT:       07_High_Compilation_And_AdHoc_Flood.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Measures single-use Ad-Hoc plan cache bloat and compilation pressure.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    objtype AS [Cache_Object_Type],
+    COUNT(*) AS [Total_Cached_Plans],
+    SUM(CASE WHEN usecounts = 1 THEN 1 ELSE 0 END) AS [Single_Use_Plans],
+    CAST(SUM(CAST(size_in_bytes AS BIGINT)) / 1048576.0 AS DECIMAL(12,2)) AS [Total_Cache_Size_MB],
+    CAST(SUM(CASE WHEN usecounts = 1 THEN CAST(size_in_bytes AS BIGINT) ELSE 0 END) / 1048576.0 AS DECIMAL(12,2)) AS [Single_Use_Bloat_MB],
+    N'EXEC sp_configure ''optimize for ad hoc workloads'', 1; RECONFIGURE;' AS [Remediation_Command]
+FROM sys.dm_exec_cached_plans
+GROUP BY objtype
+ORDER BY [Single_Use_Bloat_MB] DESC;
+'@
+
+Write-KitFile "02_CPU_At_100_Percent\08_Scheduler_Run_Queue_Pressure.sql" @'
+/*========================================================================================================================
+SCRIPT:       08_Scheduler_Run_Queue_Pressure.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Checks sys.dm_os_schedulers for runnable tasks waiting for a CPU core and worker thread exhaustion.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    parent_node_id AS [NUMA_Node],
+    scheduler_id AS [Scheduler_ID],
+    cpu_id AS [CPU_ID],
+    status AS [Status],
+    current_tasks_count AS [Current_Tasks],
+    runnable_tasks_count AS [Runnable_Tasks_Waiting_For_CPU],
+    current_workers_count AS [Current_Workers],
+    active_workers_count AS [Active_Workers],
+    work_queue_count AS [Thread_Starvation_Work_Queue],
+    pending_disk_io_count AS [Pending_Disk_IO]
+FROM sys.dm_os_schedulers
+WHERE scheduler_id < 255
+ORDER BY runnable_tasks_count DESC, current_tasks_count DESC;
+'@
+
+# ======================================================================================================================
+# FOLDER 03: BLOCKING AND DEADLOCKS (SCRIPTS 09 - 13)
+# ======================================================================================================================
+Write-KitFile "03_Blocking_And_Deadlocks\09_Lead_Blocker_Tree_And_Kill_Generator.sql" @'
+/*========================================================================================================================
+SCRIPT:       09_Lead_Blocker_Tree_And_Kill_Generator.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Builds a visual recursive blocking tree showing Root Blockers and all downstream victims.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+;WITH ActiveChain AS (
+    SELECT
+        s.session_id,
+        ISNULL(r.blocking_session_id, 0) AS blocking_session_id,
+        s.status,
+        s.open_transaction_count,
+        r.wait_type,
+        r.wait_time / 1000.0 AS wait_sec,
+        DB_NAME(COALESCE(r.database_id, s.database_id)) AS db_name,
+        s.login_name,
+        s.host_name,
+        s.program_name,
+        COALESCE(r.sql_handle, c.most_recent_sql_handle) AS sql_handle
+    FROM sys.dm_exec_sessions s
+    LEFT JOIN sys.dm_exec_requests r ON s.session_id = r.session_id
+    LEFT JOIN sys.dm_exec_connections c ON s.session_id = c.session_id
+    WHERE s.is_user_process = 1
+),
+BlockingTree AS (
+    SELECT
+        session_id, blocking_session_id, status, open_transaction_count,
+        wait_type, wait_sec, db_name, login_name, host_name, program_name, sql_handle,
+        0 AS [Level],
+        CAST(RIGHT('0000' + CAST(session_id AS VARCHAR(10)), 4) AS VARCHAR(MAX)) AS [Sort_Path]
+    FROM ActiveChain
+    WHERE blocking_session_id = 0
+      AND session_id IN (SELECT blocking_session_id FROM ActiveChain WHERE blocking_session_id > 0)
+    UNION ALL
+    SELECT
+        c.session_id, c.blocking_session_id, c.status, c.open_transaction_count,
+        c.wait_type, c.wait_sec, c.db_name, c.login_name, c.host_name, c.program_name, c.sql_handle,
+        bt.[Level] + 1,
+        bt.[Sort_Path] + ' -> ' + RIGHT('0000' + CAST(c.session_id AS VARCHAR(10)), 4)
+    FROM ActiveChain c
+    INNER JOIN BlockingTree bt ON c.blocking_session_id = bt.session_id
+    WHERE bt.[Level] < 20
+)
+SELECT
+    REPLICATE(N'    |--> ', bt.[Level]) + N'SPID ' + CAST(bt.session_id AS NVARCHAR(10)) AS [Blocking_Hierarchy_Tree],
+    bt.[Level] AS [Depth],
+    bt.status AS [Status],
+    bt.open_transaction_count AS [Open_Trans],
+    ISNULL(bt.wait_type, N'ROOT BLOCKER (IDLE/RUNNING)') AS [Wait_Type],
+    CAST(ISNULL(bt.wait_sec, 0) AS DECIMAL(12,1)) AS [Wait_Sec],
+    bt.db_name AS [DB_Name],
+    bt.login_name,
+    bt.host_name,
+    bt.program_name,
+    SUBSTRING(st.text, 1, 400) AS [SQL_Text],
+    CASE WHEN bt.[Level] = 0 THEN N'KILL ' + CAST(bt.session_id AS NVARCHAR(10)) + N';' ELSE N'-- Victim --' END AS [Root_Kill_Command]
+FROM BlockingTree bt
+OUTER APPLY sys.dm_exec_sql_text(bt.sql_handle) st
+ORDER BY bt.[Sort_Path];
+'@
+
+Write-KitFile "03_Blocking_And_Deadlocks\10_Open_Sleeping_Transactions_With_Locks.sql" @'
+/*========================================================================================================================
+SCRIPT:       10_Open_Sleeping_Transactions_With_Locks.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Finds idle/sleeping sessions that left an open transaction (BEGIN TRAN without COMMIT) holding locks.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    s.session_id AS [SPID],
+    s.status AS [Session_Status],
+    s.open_transaction_count AS [Open_Trans],
+    DATEDIFF(SECOND, s.last_request_end_time, GETDATE()) AS [Idle_Since_Last_Batch_Sec],
+    DB_NAME(s.database_id) AS [Database_Name],
+    s.login_name,
+    s.host_name,
+    s.program_name,
+    SUBSTRING(st.text, 1, 500) AS [Last_Executed_SQL_Batch],
+    N'KILL ' + CAST(s.session_id AS NVARCHAR(10)) + N';' AS [Kill_Orphaned_Session_Cmd]
+FROM sys.dm_exec_sessions s
+LEFT JOIN sys.dm_exec_connections c ON s.session_id = c.session_id
+OUTER APPLY sys.dm_exec_sql_text(c.most_recent_sql_handle) st
+WHERE s.is_user_process = 1
+  AND s.status = N'sleeping'
+  AND s.open_transaction_count > 0
+ORDER BY [Idle_Since_Last_Batch_Sec] DESC;
+'@
+
+Write-KitFile "03_Blocking_And_Deadlocks\11_Live_Lock_Escalation_And_Waiters.sql" @'
+/*========================================================================================================================
+SCRIPT:       11_Live_Lock_Escalation_And_Waiters.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Shows granted and waiting locks by Database and Object to spot table-level Lock Escalations.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT TOP (50)
+    tl.request_session_id AS [SPID],
+    DB_NAME(tl.resource_database_id) AS [Database_Name],
+    tl.resource_type AS [Resource_Type],
+    CASE
+        WHEN tl.resource_type = N'OBJECT' THEN OBJECT_NAME(tl.resource_associated_entity_id, tl.resource_database_id)
+        ELSE CAST(tl.resource_associated_entity_id AS NVARCHAR(50))
+    END AS [Resource_Entity],
+    tl.request_mode AS [Lock_Mode],
+    tl.request_status AS [Lock_Status],
+    COUNT(*) AS [Lock_Count]
+FROM sys.dm_tran_locks tl
+WHERE tl.request_session_id <> @@SPID
+  AND tl.resource_type <> N'DATABASE'
+GROUP BY tl.request_session_id, tl.resource_database_id, tl.resource_type,
+         tl.resource_associated_entity_id, tl.request_mode, tl.request_status
+ORDER BY CASE WHEN tl.request_status = N'WAIT' THEN 0 ELSE 1 END, [Lock_Count] DESC;
+'@
+
+Write-KitFile "03_Blocking_And_Deadlocks\12_SystemHealth_Deadlock_XML_Decoder.sql" @'
+/*========================================================================================================================
+SCRIPT:       12_SystemHealth_Deadlock_XML_Decoder.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Extracts the latest 25 Deadlock XML Graphs directly from the built-in system_health Extended Event ring buffer.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+;WITH SystemHealthXML AS (
+    SELECT CAST(target_data AS XML) AS TargetData
+    FROM sys.dm_xe_session_targets st
+    INNER JOIN sys.dm_xe_sessions s ON s.address = st.event_session_address
+    WHERE s.name = N'system_health'
+      AND st.target_name = N'ring_buffer'
+)
+SELECT TOP (25)
+    XEvent.value('(@timestamp)[1]', 'datetime2') AS [UTC_Deadlock_Time],
+    XEvent.query('(data/value/deadlock)[1]') AS [Click_To_Open_Deadlock_Graph_XML]
+FROM SystemHealthXML
+CROSS APPLY TargetData.nodes('//RingBufferTarget/event[@name="xml_deadlock_report"]') AS XEventData(XEvent)
+ORDER BY [UTC_Deadlock_Time] DESC;
+'@
+
+Write-KitFile "03_Blocking_And_Deadlocks\13_Application_Connection_Pool_Storm_Check.sql" @'
+/*========================================================================================================================
+SCRIPT:       13_Application_Connection_Pool_Storm_Check.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Groups all sessions by Host, Application, and Login to detect connection pool leaks & ASYNC_NETWORK_IO.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    host_name AS [Client_Host_Name],
+    program_name AS [Application_Name],
+    login_name AS [Login_Name],
+    DB_NAME(database_id) AS [Database_Name],
+    COUNT(*) AS [Total_Connections],
+    SUM(CASE WHEN status = N'running' OR status = N'runnable' OR status = N'suspended' THEN 1 ELSE 0 END) AS [Active_Sessions],
+    SUM(CASE WHEN status = N'sleeping' THEN 1 ELSE 0 END) AS [Sleeping_Pool_Sessions],
+    SUM(open_transaction_count) AS [Total_Open_Transactions]
+FROM sys.dm_exec_sessions
+WHERE is_user_process = 1
+GROUP BY host_name, program_name, login_name, database_id
+ORDER BY [Total_Connections] DESC;
+'@
+
+# ======================================================================================================================
+# FOLDER 04: MEMORY AND STORAGE IOPS CRISIS (SCRIPTS 14 - 18)
+# ======================================================================================================================
+Write-KitFile "04_Memory_And_Storage_IOPS_Crisis\14_PLE_And_Memory_Clerk_Hog_Analyzer.sql" @'
+/*========================================================================================================================
+SCRIPT:       14_PLE_And_Memory_Clerk_Hog_Analyzer.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Displays Page Life Expectancy (PLE) and Top Memory Clerks consuming SQL Server RAM.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    object_name AS [Counter_Object],
+    instance_name AS [NUMA_Node],
+    cntr_value AS [Page_Life_Expectancy_Sec],
+    CASE WHEN cntr_value < 300 THEN N'CRITICAL: Buffer Pool Thrashing (<300s)' ELSE N'Healthy' END AS [PLE_Status]
+FROM sys.dm_os_performance_counters
+WHERE object_name LIKE N'%Buffer Node%' AND RTRIM(counter_name) = N'Page life expectancy';
+
+SELECT TOP (15)
+    type AS [Memory_Clerk_Type],
+    name AS [Clerk_Name],
+    CAST(SUM(pages_kb) / 1024.0 AS DECIMAL(14,2)) AS [Memory_Used_MB]
+FROM sys.dm_os_memory_clerks
+GROUP BY type, name
+ORDER BY SUM(pages_kb) DESC;
+'@
+
+Write-KitFile "04_Memory_And_Storage_IOPS_Crisis\15_Memory_Grant_Pending_Queue_Rescue.sql" @'
+/*========================================================================================================================
+SCRIPT:       15_Memory_Grant_Pending_Queue_Rescue.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Shows queries holding huge workspace memory grants vs queries stuck waiting on RESOURCE_SEMAPHORE.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    mg.session_id AS [SPID],
+    CASE WHEN mg.grant_time IS NULL THEN N'WAITING IN QUEUE (RESOURCE_SEMAPHORE)' ELSE N'GRANTED & HOLDING RAM' END AS [Grant_Status],
+    CAST(mg.requested_memory_kb / 1024.0 AS DECIMAL(12,2)) AS [Requested_MB],
+    CAST(mg.granted_memory_kb / 1024.0 AS DECIMAL(12,2)) AS [Granted_MB],
+    CAST(mg.used_memory_kb / 1024.0 AS DECIMAL(12,2)) AS [Actually_Used_MB],
+    mg.dop AS [DOP],
+    mg.query_cost AS [Estimated_Cost],
+    DB_NAME(r.database_id) AS [DB_Name],
+    SUBSTRING(st.text, 1, 400) AS [Query_Text],
+    qp.query_plan AS [Plan_XML]
+FROM sys.dm_exec_query_memory_grants mg
+LEFT JOIN sys.dm_exec_requests r ON mg.session_id = r.session_id
+OUTER APPLY sys.dm_exec_sql_text(mg.sql_handle) st
+OUTER APPLY sys.dm_exec_query_plan(mg.plan_handle) qp
+ORDER BY CASE WHEN mg.grant_time IS NULL THEN 0 ELSE 1 END, mg.requested_memory_kb DESC;
+'@
+
+Write-KitFile "04_Memory_And_Storage_IOPS_Crisis\16_Disk_Latency_Stall_By_Database_File.sql" @'
+/*========================================================================================================================
+SCRIPT:       16_Disk_Latency_Stall_By_Database_File.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Calculates Read & Write Disk Latency (ms) per database file to pinpoint slow SAN/Cloud storage volumes.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    DB_NAME(vfs.database_id) AS [Database_Name],
+    mf.name AS [Logical_File_Name],
+    mf.type_desc AS [File_Type],
+    LEFT(mf.physical_name, 3) AS [Drive],
+    mf.physical_name AS [Physical_Path],
+    CAST(vfs.size_on_disk_bytes / 1048576.0 AS DECIMAL(14,2)) AS [File_Size_MB],
+    CAST(vfs.io_stall_read_ms / NULLIF(vfs.num_of_reads, 0) AS DECIMAL(12,2)) AS [Avg_Read_Latency_ms],
+    CAST(vfs.io_stall_write_ms / NULLIF(vfs.num_of_writes, 0) AS DECIMAL(12,2)) AS [Avg_Write_Latency_ms],
+    CASE
+        WHEN (vfs.io_stall_write_ms / NULLIF(vfs.num_of_writes, 0)) > 20 THEN N'CRITICAL: High Write Latency (>20ms)'
+        WHEN (vfs.io_stall_read_ms / NULLIF(vfs.num_of_reads, 0)) > 20 THEN N'WARNING: High Read Latency (>20ms)'
+        ELSE N'Healthy (<20ms)'
+    END AS [Storage_Verdict]
+FROM sys.dm_io_virtual_file_stats(NULL, NULL) vfs
+INNER JOIN sys.master_files mf ON vfs.database_id = mf.database_id AND vfs.file_id = mf.file_id
+ORDER BY (vfs.io_stall_read_ms + vfs.io_stall_write_ms) DESC;
+'@
+
+Write-KitFile "04_Memory_And_Storage_IOPS_Crisis\17_Top_Physical_IO_Thrashing_Queries.sql" @'
+/*========================================================================================================================
+SCRIPT:       17_Top_Physical_IO_Thrashing_Queries.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Finds queries causing the heaviest physical disk reads and writes in the plan cache.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT TOP (20)
+    DB_NAME(st.dbid) AS [Database_Name],
+    qs.execution_count AS [Executions],
+    qs.total_physical_reads AS [Total_Physical_Reads],
+    qs.total_physical_reads / NULLIF(qs.execution_count, 0) AS [Avg_Physical_Reads],
+    qs.total_logical_reads / NULLIF(qs.execution_count, 0) AS [Avg_Logical_Reads],
+    qs.total_logical_writes AS [Total_Writes],
+    SUBSTRING(st.text, 1, 400) AS [Query_Snippet],
+    qp.query_plan AS [Plan_XML]
+FROM sys.dm_exec_query_stats qs
+OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+OUTER APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+ORDER BY qs.total_physical_reads DESC;
+'@
+
+Write-KitFile "04_Memory_And_Storage_IOPS_Crisis\18_Buffer_Pool_Dirty_Page_Usage_By_DB.sql" @'
+/*========================================================================================================================
+SCRIPT:       18_Buffer_Pool_Dirty_Page_Usage_By_DB.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Breaks down Buffer Pool RAM usage and Dirty Pages per database.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    CASE WHEN database_id = 32767 THEN N'ResourceDB' ELSE DB_NAME(database_id) END AS [Database_Name],
+    CAST(COUNT(*) * 8.0 / 1024.0 AS DECIMAL(14,2)) AS [Total_Buffer_Pool_MB],
+    CAST(SUM(CASE WHEN is_modified = 1 THEN 1 ELSE 0 END) * 8.0 / 1024.0 AS DECIMAL(14,2)) AS [Dirty_Pages_MB],
+    CAST(SUM(CASE WHEN is_modified = 0 THEN 1 ELSE 0 END) * 8.0 / 1024.0 AS DECIMAL(14,2)) AS [Clean_Pages_MB]
+FROM sys.dm_os_buffer_descriptors
+GROUP BY database_id
+ORDER BY [Total_Buffer_Pool_MB] DESC;
+'@
+
+# ======================================================================================================================
+# FOLDER 05: TEMPDB AND TRANSACTION LOG FULL (SCRIPTS 19 - 24)
+# ======================================================================================================================
+Write-KitFile "05_TempDB_And_Transaction_Log_Full\19_TempDB_Space_Hog_By_Session_And_Task.sql" @'
+/*========================================================================================================================
+SCRIPT:       19_TempDB_Space_Hog_By_Session_And_Task.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Shows global TempDB consumption (User Objects, Internal Spills, Version Store) and top hogging SPIDs.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    CAST(SUM(total_page_count) * 8.0 / 1024.0 AS DECIMAL(12,2)) AS [Total_TempDB_MB],
+    CAST(SUM(unallocated_extent_page_count) * 8.0 / 1024.0 AS DECIMAL(12,2)) AS [Free_TempDB_MB],
+    CAST(SUM(user_object_reserved_page_count) * 8.0 / 1024.0 AS DECIMAL(12,2)) AS [User_Objects_TempTables_MB],
+    CAST(SUM(internal_object_reserved_page_count) * 8.0 / 1024.0 AS DECIMAL(12,2)) AS [Internal_Sort_Hash_Spills_MB],
+    CAST(SUM(version_store_reserved_page_count) * 8.0 / 1024.0 AS DECIMAL(12,2)) AS [Version_Store_MB]
+FROM tempdb.sys.dm_db_file_space_usage;
+
+;WITH SessionTempDB AS (
+    SELECT
+        session_id,
+        SUM(user_objects_alloc_page_count - user_objects_dealloc_page_count) * 8.0 / 1024.0 AS User_Obj_MB,
+        SUM(internal_objects_alloc_page_count - internal_objects_dealloc_page_count) * 8.0 / 1024.0 AS Internal_Obj_MB
+    FROM sys.dm_db_session_space_usage
+    GROUP BY session_id
+),
+TaskTempDB AS (
+    SELECT
+        session_id,
+        SUM(user_objects_alloc_page_count - user_objects_dealloc_page_count) * 8.0 / 1024.0 AS Active_Task_User_MB,
+        SUM(internal_objects_alloc_page_count - internal_objects_dealloc_page_count) * 8.0 / 1024.0 AS Active_Task_Internal_MB
+    FROM sys.dm_db_task_space_usage
+    GROUP BY session_id
+)
+SELECT TOP (20)
+    s.session_id AS [SPID],
+    s.status AS [Status],
+    s.login_name,
+    s.host_name,
+    s.program_name,
+    CAST(ISNULL(st.User_Obj_MB, 0) + ISNULL(tt.Active_Task_User_MB, 0) AS DECIMAL(12,2)) AS [Net_User_TempTables_MB],
+    CAST(ISNULL(st.Internal_Obj_MB, 0) + ISNULL(tt.Active_Task_Internal_MB, 0) AS DECIMAL(12,2)) AS [Net_Internal_Spills_MB],
+    SUBSTRING(txt.text, 1, 400) AS [SQL_Text],
+    N'KILL ' + CAST(s.session_id AS NVARCHAR(10)) + N';' AS [Kill_TempDB_Hog_Cmd]
+FROM sys.dm_exec_sessions s
+LEFT JOIN SessionTempDB st ON s.session_id = st.session_id
+LEFT JOIN TaskTempDB tt ON s.session_id = tt.session_id
+LEFT JOIN sys.dm_exec_connections c ON s.session_id = c.session_id
+OUTER APPLY sys.dm_exec_sql_text(c.most_recent_sql_handle) txt
+WHERE s.is_user_process = 1
+ORDER BY ([Net_User_TempTables_MB] + [Net_Internal_Spills_MB]) DESC;
+'@
+
+Write-KitFile "05_TempDB_And_Transaction_Log_Full\20_Version_Store_Runaway_Transaction_Finder.sql" @'
+/*========================================================================================================================
+SCRIPT:       20_Version_Store_Runaway_Transaction_Finder.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Finds the oldest active Snapshot/RCSI transaction blocking TempDB Version Store cleanup.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT TOP (15)
+    ast.session_id AS [SPID],
+    ast.elapsed_time_seconds AS [Open_Snapshot_Duration_Sec],
+    ast.is_snapshot AS [Is_Snapshot],
+    ast.max_version_chain_traversed AS [Max_Version_Chain],
+    s.status AS [Session_Status],
+    DB_NAME(s.database_id) AS [Database_Name],
+    s.login_name,
+    s.host_name,
+    s.program_name,
+    SUBSTRING(st.text, 1, 400) AS [Last_SQL_Text],
+    N'KILL ' + CAST(ast.session_id AS NVARCHAR(10)) + N';' AS [Kill_Cmd]
+FROM sys.dm_tran_active_snapshot_database_transactions ast
+INNER JOIN sys.dm_exec_sessions s ON ast.session_id = s.session_id
+LEFT JOIN sys.dm_exec_connections c ON ast.session_id = c.session_id
+OUTER APPLY sys.dm_exec_sql_text(c.most_recent_sql_handle) st
+ORDER BY ast.elapsed_time_seconds DESC;
+'@
+
+Write-KitFile "05_TempDB_And_Transaction_Log_Full\21_TempDB_PAGELATCH_Contention_Check.sql" @'
+/*========================================================================================================================
+SCRIPT:       21_TempDB_PAGELATCH_Contention_Check.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Checks TempDB file layout uniformity and active PAGELATCH allocation contention on PFS/GAM/SGAM pages.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    file_id,
+    name AS [Logical_Name],
+    type_desc,
+    CAST(size * 8.0 / 1024.0 AS DECIMAL(12,2)) AS [Size_MB],
+    is_percent_growth,
+    growth
+FROM tempdb.sys.database_files;
+
+SELECT
+    session_id AS [SPID],
+    wait_type,
+    wait_time AS [Wait_ms],
+    wait_resource
+FROM sys.dm_exec_requests
+WHERE wait_type LIKE N'PAGELATCH_%'
+  AND wait_resource LIKE N'2:%';
+'@
+
+Write-KitFile "05_TempDB_And_Transaction_Log_Full\22_Transaction_Log_Full_Why_Wont_It_Truncate.sql" @'
+/*========================================================================================================================
+SCRIPT:       22_Transaction_Log_Full_Why_Wont_It_Truncate.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Diagnoses Error 9002 (Transaction Log Full) and tells you exactly what is preventing truncation.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    d.name AS [Database_Name],
+    d.recovery_model_desc AS [Recovery_Model],
+    d.log_reuse_wait_desc AS [Why_Log_Wont_Truncate],
+    CASE d.log_reuse_wait_desc
+        WHEN N'NOTHING' THEN N'Log is free to reuse space normally.'
+        WHEN N'LOG_BACKUP' THEN N'ACTION: Take a Transaction Log Backup immediately!'
+        WHEN N'ACTIVE_TRANSACTION' THEN N'ACTION: Run Script #24 to find and kill/commit the open transaction!'
+        WHEN N'AVAILABILITY_REPLICA' THEN N'ACTION: Secondary AG replica is lagging -> Run Script #25!'
+        WHEN N'REPLICATION' THEN N'ACTION: CDC or Transactional Replication Log Reader Agent is failing/stopped!'
+        WHEN N'ACTIVE_BACKUP_OR_RESTORE' THEN N'ACTION: Wait for active Full/Diff backup to complete -> Check Script #27.'
+        ELSE N'Consult Field Manual for ' + d.log_reuse_wait_desc
+    END AS [Remediation_Prescription]
+FROM sys.databases d
+ORDER BY CASE WHEN d.log_reuse_wait_desc NOT IN (N'NOTHING') THEN 0 ELSE 1 END, d.name;
+'@
+
+Write-KitFile "05_TempDB_And_Transaction_Log_Full\23_Active_VLF_Count_And_Safe_Shrink_Generator.sql" @'
+/*========================================================================================================================
+SCRIPT:       23_Active_VLF_Count_And_Safe_Shrink_Generator.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Counts Virtual Log Files (VLFs) per database (SQL 2016 SP2+ sys.dm_db_log_info) to spot VLF bloat.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    d.name AS [Database_Name],
+    COUNT(li.database_id) AS [Total_VLF_Count],
+    SUM(CASE WHEN li.vlf_active = 1 THEN 1 ELSE 0 END) AS [Active_VLFs],
+    CAST(SUM(li.vlf_size_mb) AS DECIMAL(14,2)) AS [Total_Log_Size_MB],
+    CASE WHEN COUNT(li.database_id) > 1000 THEN N'WARNING: Excessive VLF Fragmentation (>1000 VLFs)' ELSE N'OK' END AS [VLF_Health]
+FROM sys.databases d
+CROSS APPLY sys.dm_db_log_info(d.database_id) li
+GROUP BY d.name
+ORDER BY [Total_VLF_Count] DESC;
+'@
+
+Write-KitFile "05_TempDB_And_Transaction_Log_Full\24_Long_Running_Uncommitted_Transaction_Sniper.sql" @'
+/*========================================================================================================================
+SCRIPT:       24_Long_Running_Uncommitted_Transaction_Sniper.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Pinpoints the exact uncommitted transaction holding the Transaction Log hostage and its log bytes used.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT TOP (20)
+    st.session_id AS [SPID],
+    DB_NAME(dt.database_id) AS [Database_Name],
+    DATEDIFF(SECOND, dt.database_transaction_begin_time, GETDATE()) AS [Transaction_Age_Sec],
+    CAST(dt.database_transaction_log_bytes_used / 1048576.0 AS DECIMAL(14,2)) AS [Log_Space_Used_MB],
+    CAST(dt.database_transaction_log_bytes_reserved / 1048576.0 AS DECIMAL(14,2)) AS [Log_Space_Reserved_MB],
+    s.status AS [Session_Status],
+    s.login_name,
+    s.host_name,
+    s.program_name,
+    SUBSTRING(txt.text, 1, 400) AS [Last_SQL_Statement],
+    N'KILL ' + CAST(st.session_id AS NVARCHAR(10)) + N';' AS [Kill_Cmd]
+FROM sys.dm_tran_database_transactions dt
+INNER JOIN sys.dm_tran_session_transactions st ON dt.transaction_id = st.transaction_id
+INNER JOIN sys.dm_exec_sessions s ON st.session_id = s.session_id
+LEFT JOIN sys.dm_exec_connections c ON st.session_id = c.session_id
+OUTER APPLY sys.dm_exec_sql_text(c.most_recent_sql_handle) txt
+WHERE dt.database_transaction_begin_time IS NOT NULL
+ORDER BY dt.database_transaction_begin_time ASC;
+'@
+
+# ======================================================================================================================
+# FOLDER 06: HADR, REPLICATION AND CORRUPTION RESCUE (SCRIPTS 25 - 28)
+# ======================================================================================================================
+Write-KitFile "06_HADR_Replication_And_Corruption_Rescue\25_AlwaysOn_AG_Redo_And_Send_Queue_Lag.sql" @'
+/*========================================================================================================================
+SCRIPT:       25_AlwaysOn_AG_Redo_And_Send_Queue_Lag.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Checks Always On Availability Group Send Queue, Redo Queue, and Synchronization Health across replicas.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    ag.name AS [AG_Name],
+    ar.replica_server_name AS [Replica_Server],
+    DB_NAME(drs.database_id) AS [Database_Name],
+    ars.role_desc AS [Role],
+    drs.synchronization_state_desc AS [Sync_State],
+    drs.synchronization_health_desc AS [Sync_Health],
+    drs.log_send_queue_size AS [Send_Queue_KB],
+    drs.redo_queue_size AS [Redo_Queue_KB],
+    drs.redo_rate AS [Redo_Rate_KB_Sec],
+    CAST(drs.redo_queue_size * 1.0 / NULLIF(drs.redo_rate, 0) AS DECIMAL(12,1)) AS [Est_Redo_Catchup_Sec],
+    drs.last_commit_time AS [Last_Commit_Time]
+FROM sys.dm_hadr_database_replica_states drs
+INNER JOIN sys.availability_replicas ar ON drs.replica_id = ar.replica_id
+INNER JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
+LEFT JOIN sys.dm_hadr_availability_replica_states ars ON drs.replica_id = ars.replica_id
+ORDER BY drs.redo_queue_size DESC, drs.log_send_queue_size DESC;
+'@
+
+Write-KitFile "06_HADR_Replication_And_Corruption_Rescue\26_Suspect_Pages_And_I_O_Error_Detector.sql" @'
+/*========================================================================================================================
+SCRIPT:       26_Suspect_Pages_And_I_O_Error_Detector.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Inspects msdb.dbo.suspect_pages for 823/824/825 corruption errors and decodes the Page Status.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    DB_NAME(sp.database_id) AS [Database_Name],
+    sp.database_id,
+    sp.file_id,
+    mf.name AS [Logical_File_Name],
+    mf.physical_name AS [Physical_File_Path],
+    sp.page_id AS [Corrupted_Page_ID],
+    CASE sp.event_type
+        WHEN 1 THEN N'823 or 824 I/O Error'
+        WHEN 2 THEN N'Bad Checksum'
+        WHEN 3 THEN N'Torn Page'
+        WHEN 4 THEN N'Restored (Fixed)'
+        WHEN 5 THEN N'Repaired by DBCC'
+        WHEN 7 THEN N'Deallocated by DBCC'
+        ELSE N'Unknown'
+    END AS [Corruption_Type],
+    sp.error_count,
+    sp.last_update_date
+FROM msdb.dbo.suspect_pages sp
+LEFT JOIN sys.master_files mf ON sp.database_id = mf.database_id AND sp.file_id = mf.file_id
+ORDER BY sp.last_update_date DESC;
+'@
+
+Write-KitFile "06_HADR_Replication_And_Corruption_Rescue\27_Backup_And_Restore_ETA_Progress_Tracker.sql" @'
+/*========================================================================================================================
+SCRIPT:       27_Backup_And_Restore_ETA_Progress_Tracker.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Tracks percent_complete and exact ETA for running BACKUP, RESTORE, DBCC CHECKDB, and ALTER INDEX jobs.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    r.session_id AS [SPID],
+    r.command AS [Operation],
+    DB_NAME(r.database_id) AS [Database_Name],
+    CAST(r.percent_complete AS DECIMAL(5,2)) AS [Pct_Complete],
+    CAST(r.total_elapsed_time / 60000.0 AS DECIMAL(10,1)) AS [Elapsed_Minutes],
+    CAST(r.estimated_completion_time / 60000.0 AS DECIMAL(10,1)) AS [Remaining_Minutes],
+    DATEADD(MILLISECOND, r.estimated_completion_time, GETDATE()) AS [Estimated_Finish_Time],
+    r.wait_type AS [Current_Wait]
+FROM sys.dm_exec_requests r
+WHERE r.percent_complete > 0
+   OR r.command IN (N'BACKUP DATABASE', N'BACKUP LOG', N'RESTORE DATABASE', N'RESTORE LOG', N'DBCC', N'DbccFilesCompact');
+'@
+
+Write-KitFile "06_HADR_Replication_And_Corruption_Rescue\28_Ghost_Cleanup_And_Rollback_Progress_Tracker.sql" @'
+/*========================================================================================================================
+SCRIPT:       28_Ghost_Cleanup_And_Rollback_Progress_Tracker.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Tracks progress and ETA of KILLED/ROLLBACK sessions and Ghost Cleanup tasks.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    r.session_id AS [SPID],
+    r.status AS [Status],
+    r.command AS [Command],
+    DB_NAME(r.database_id) AS [Database_Name],
+    CAST(r.percent_complete AS DECIMAL(5,2)) AS [Rollback_Pct_Complete],
+    CAST(r.estimated_completion_time / 1000.0 AS DECIMAL(12,1)) AS [Est_Seconds_Remaining],
+    r.wait_type,
+    r.cpu_time,
+    r.reads,
+    r.writes
+FROM sys.dm_exec_requests r
+WHERE r.command = N'KILLED/ROLLBACK'
+   OR r.status = N'rollback'
+   OR r.command LIKE N'%GHOST%';
+'@
+
+# ======================================================================================================================
+# FOLDER 07: POST-MORTEM AND RCA TEMPLATES (SCRIPTS 29 - 30 + RCA TEMPLATE)
+# ======================================================================================================================
+Write-KitFile "07_Post_Mortem_And_RCA_Templates\29_Query_Store_Regression_Time_Machine.sql" @'
+/*========================================================================================================================
+SCRIPT:       29_Query_Store_Regression_Time_Machine.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Finds queries in the current database's Query Store with multiple plans where CPU regressed in last 24h.
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT TOP (20)
+    q.query_id,
+    qt.query_sql_text,
+    COUNT(DISTINCT p.plan_id) AS [Distinct_Plan_Count],
+    MIN(p.plan_id) AS [Older_Plan_ID],
+    MAX(p.plan_id) AS [Newer_Plan_ID],
+    CAST(MIN(rs.avg_cpu_time) / 1000.0 AS DECIMAL(14,2)) AS [Best_Plan_Avg_CPU_ms],
+    CAST(MAX(rs.avg_cpu_time) / 1000.0 AS DECIMAL(14,2)) AS [Worst_Plan_Avg_CPU_ms],
+    N'EXEC sys.sp_query_store_force_plan @query_id = ' + CAST(q.query_id AS NVARCHAR(20))
+    + N', @plan_id = ' + CAST(MIN(p.plan_id) AS NVARCHAR(20)) + N';' AS [Force_Good_Plan_Cmd]
+FROM sys.query_store_query q
+INNER JOIN sys.query_store_query_text qt ON q.query_text_id = qt.query_text_id
+INNER JOIN sys.query_store_plan p ON q.query_id = p.query_id
+INNER JOIN sys.query_store_runtime_stats rs ON p.plan_id = rs.plan_id
+INNER JOIN sys.query_store_runtime_stats_interval rsi ON rs.runtime_stats_interval_id = rsi.runtime_stats_interval_id
+WHERE rsi.start_time >= DATEADD(HOUR, -24, GETUTCDATE())
+GROUP BY q.query_id, qt.query_sql_text
+HAVING COUNT(DISTINCT p.plan_id) > 1
+   AND MAX(rs.avg_cpu_time) > (MIN(rs.avg_cpu_time) * 3)
+ORDER BY (MAX(rs.avg_cpu_time) - MIN(rs.avg_cpu_time)) DESC;
+'@
+
+Write-KitFile "07_Post_Mortem_And_RCA_Templates\30_Wait_Stats_Delta_60_Second_Sampler.sql" @'
+/*========================================================================================================================
+SCRIPT:       30_Wait_Stats_Delta_60_Second_Sampler.sql
+TOOLKIT:      The SQL Server Firefighting & Triage Kit (v1.0)
+PURPOSE:      Captures a live 10-second delta of sys.dm_os_wait_stats (excluding benign idle waits).
+========================================================================================================================*/
+SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+IF OBJECT_ID('tempdb..#WaitSnap1') IS NOT NULL DROP TABLE #WaitSnap1;
+
+SELECT wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms
+INTO #WaitSnap1
+FROM sys.dm_os_wait_stats
+WHERE waiting_tasks_count > 0;
+
+WAITFOR DELAY '00:00:10'; -- 10-second live sample
+
+SELECT TOP (15)
+    w2.wait_type AS [Wait_Type],
+    (w2.waiting_tasks_count - ISNULL(w1.waiting_tasks_count, 0)) AS [Wait_Count_Delta],
+    CAST((w2.wait_time_ms - ISNULL(w1.wait_time_ms, 0)) / 1000.0 AS DECIMAL(12,2)) AS [Total_Wait_Sec_Delta],
+    CAST((w2.signal_wait_time_ms - ISNULL(w1.signal_wait_time_ms, 0)) / 1000.0 AS DECIMAL(12,2)) AS [Signal_CPU_Wait_Sec_Delta],
+    CAST((w2.wait_time_ms - ISNULL(w1.wait_time_ms, 0)) * 1.0 / NULLIF((w2.waiting_tasks_count - ISNULL(w1.waiting_tasks_count, 0)), 0) AS DECIMAL(12,2)) AS [Avg_Wait_ms]
+FROM sys.dm_os_wait_stats w2
+LEFT JOIN #WaitSnap1 w1 ON w2.wait_type = w1.wait_type
+WHERE (w2.wait_time_ms - ISNULL(w1.wait_time_ms, 0)) > 0
+  AND w2.wait_type NOT IN (
+    N'BROKER_EVENTHANDLER', N'BROKER_RECEIVE_WAITFOR', N'BROKER_TASK_STOP', N'BROKER_TO_FLUSH',
+    N'CHECKPOINT_QUEUE', N'CHKPT', N'CLR_AUTO_EVENT', N'CLR_MANUAL_EVENT', N'DIRTY_PAGE_POLL',
+    N'FT_IFTS_SCHEDULER_IDLE_WAIT', N'HADR_FILESTREAM_IOMGR_IOCOMPLETION', N'HADR_LOGCAPTURE_WAIT',
+    N'HADR_TIMER_TASK', N'HADR_WORK_QUEUE', N'LAZYWRITER_SLEEP', N'LOGMGR_QUEUE',
+    N'ONDEMAND_TASK_QUEUE', N'PARALLEL_REDO_WORKER_WAIT_WORK', N'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP',
+    N'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP', N'REQUEST_FOR_DEADLOCK_SEARCH', N'RESOURCE_QUEUE',
+    N'SERVER_IDLE_CHECK', N'SLEEP_BPOOL_FLUSH', N'SLEEP_DBSTARTUP', N'SLEEP_DCOMSTARTUP',
+    N'SLEEP_MASTERDBREADY', N'SLEEP_MASTERMDREADY', N'SLEEP_MASTERUPGRADED', N'SLEEP_MSDBSTARTUP',
+    N'SLEEP_SYSTEMTASK', N'SLEEP_TASK', N'SLEEP_TEMPDBSTARTUP', N'SNI_HTTP_ACCEPT',
+    N'SOS_WORK_DISPATCHER', N'SP_SERVER_DIAGNOSTICS_SLEEP', N'SQLTRACE_BUFFER_FLUSH',
+    N'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', N'WAITFOR', N'XE_DISPATCHER_WAIT', N'XE_TIMER_EVENT'
+  )
+ORDER BY [Total_Wait_Sec_Delta] DESC;
+
+DROP TABLE #WaitSnap1;
+'@
+
+Write-KitFile "07_Post_Mortem_And_RCA_Templates\Incident_Post_Mortem_RCA_Template.md" @'
+# PRODUCTION DATABASE INCIDENT POST-MORTEM & ROOT CAUSE ANALYSIS (RCA)
+
+## Incident Metadata
+
+| Incident Metadata | Details |
+| :--- | :--- |
+| **Incident Title / ID** | [e.g., INC-2026-0412: Production SQL Server OrderDB Blocking Outage] |
+| **Date & Time (UTC)** | [Start Time] to [Resolution Time] (Total Duration: XX mins) |
+| **Severity Level** | [P1 - Critical / P2 - High] |
+| **Affected Instance / DB** | [ServerName \ DatabaseName] |
+| **Incident Commander / DBA** | [Your Name] |
+
+---
+
+## 1. Executive Summary
+Provide a 3-sentence non-technical summary for leadership explaining what happened, the customer impact, and how it was resolved.
+
+---
+
+## 2. Incident Timeline (All Times UTC)
+* **HH:MM** — Monitoring alert triggered for [Symptom: e.g., CPU at 100% / Connection Timeouts].
+* **HH:MM** — DBA executed `01_First_60_Seconds_Triage.sql` and identified [Root Cause metric].
+* **HH:MM** — Remediation applied: [e.g., Terminated orphaned sleeping SPID 142 / Forced Query Store Plan ID 48].
+* **HH:MM** — Server vital signs (`SQL_CPU_Pct`, `Blocked_Sessions`) returned to baseline.
+
+---
+
+## 3. Technical Root Cause Analysis (5 Whys)
+* **Primary Bottleneck Wait Type:** [e.g., LCK_M_X / RESOURCE_SEMAPHORE / SOS_SCHEDULER_YIELD]
+* **Culprit Query / Object / Host:** [Paste SQL Snippet or Procedure Name from Toolkit Output]
+* **Why did it happen?** [Explain parameter sniffing, missing index, or uncommitted app transaction]
+
+---
+
+## 4. Permanent Corrective & Preventive Actions
+
+| # | Action Item | Owner | Target Date | Status |
+| :- | :--- | :--- | :--- | :--- |
+| 1 | [e.g., Add non-clustered covering index on dbo.Orders(CustomerID, Status)] | DBA | YYYY-MM-DD | Open |
+| 2 | [e.g., Wrap microservice call in using block with 30s command timeout] | App Team | YYYY-MM-DD | Open |
+'@
+
+# ======================================================================================================================
+# COMPRESS INTO FINAL ZIP ARCHIVE
+# ======================================================================================================================
+Compress-Archive -Path $BaseDir -DestinationPath $ZipFilePath -Force
+
+# Optional: also copy to Desktop if different
+if (Test-Path $DesktopPath) {
+    $DesktopZip = Join-Path -Path $DesktopPath -ChildPath "$RootFolderName.zip"
+    Copy-Item -Path $ZipFilePath -Destination $DesktopZip -Force
+}
+
+Write-Host "`n==========================================================================" -ForegroundColor Yellow
+Write-Host " SUCCESS! Your complete toolkit has been built and zipped!" -ForegroundColor Green
+Write-Host " Folder Location : $BaseDir" -ForegroundColor White
+Write-Host " ZIP File Ready  : $ZipFilePath" -ForegroundColor Cyan
+Write-Host "==========================================================================" -ForegroundColor Yellow

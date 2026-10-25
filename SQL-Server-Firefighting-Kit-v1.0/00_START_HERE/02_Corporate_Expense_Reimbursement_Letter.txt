@@ -1,0 +1,14 @@
+Subject: Learning & Tooling Reimbursement Request — SQL Server Incident Triage Toolkit ($79)
+
+Hi [Manager's Name],
+
+I would like to request approval to expense The SQL Server Firefighting & Triage Kit ($79) under our team's technical tooling / professional development budget.
+
+It is a library of 30 read-only production diagnostic T-SQL scripts and Standard Operating Procedures (SOPs) built specifically for live SQL Server incident response (100% CPU spikes, blocking chains, deadlocks, memory grant starvation, TempDB exhaustion, and Always On lag).
+
+Having these pre-vetted triage scripts, decision trees, and post-mortem RCA templates ready will significantly reduce our Mean Time to Resolution (MTTR) during production database alerts and standardize how our team diagnoses outages.
+
+Please let me know if I have the green light to expense this.
+
+Thanks,
+[Your Name]
