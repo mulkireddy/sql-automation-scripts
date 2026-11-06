@@ -1,0 +1,185 @@
+<#
+.SYNOPSIS
+    Checks the SSL/TLS certificate expiry date for a list of servers and exports the results to CSV.
+
+.DESCRIPTION
+    Reads server names from a text file (one per line), connects to each one over TLS,
+    reads the certificate it presents, and writes a CSV report with the expiry date.
+
+    Input file format (servers.txt):
+        server01.contoso.com
+        server02.contoso.com
+        server03.contoso.com:8443      <- optional custom port
+        # lines starting with # are ignored, blank lines are ignored
+
+.PARAMETER InputFile
+    Text file with one server per line. Default: servers.txt in the same folder as the script.
+
+.PARAMETER OutputFile
+    CSV file to create. Default: SSL_Expiry_Report_<date>.csv in the same folder as the script.
+
+.PARAMETER DefaultPort
+    Port to use when a server has no port in the list. Default: 443.
+
+.PARAMETER TimeoutSeconds
+    How long to wait for each server before giving up. Default: 10.
+
+.PARAMETER WarnDays
+    Certificates expiring within this many days are marked "Expiring Soon". Default: 30.
+
+.EXAMPLE
+    .\Check-SSLExpiry.ps1
+
+.EXAMPLE
+    .\Check-SSLExpiry.ps1 -InputFile C:\Temp\servers.txt -OutputFile C:\Temp\report.csv -WarnDays 45
+#>
+
+[CmdletBinding()]
+param(
+    [string]$InputFile,
+    [string]$OutputFile,
+    [int]$DefaultPort = 443,
+    [int]$TimeoutSeconds = 10,
+    [int]$WarnDays = 30
+)
+
+# ---------- Resolve default paths ----------
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+
+if (-not $InputFile)  { $InputFile  = Join-Path $ScriptDir 'servers.txt' }
+if (-not $OutputFile) { $OutputFile = Join-Path $ScriptDir ("SSL_Expiry_Report_{0:yyyyMMdd_HHmm}.csv" -f (Get-Date)) }
+
+if (-not (Test-Path -LiteralPath $InputFile)) {
+    Write-Error "Input file not found: $InputFile"
+    exit 1
+}
+
+# ---------- Function: fetch the certificate from a server ----------
+function Get-RemoteCertificate {
+    param(
+        [string]$ComputerName,
+        [int]$Port,
+        [int]$TimeoutMs
+    )
+
+    $tcp = New-Object System.Net.Sockets.TcpClient
+    try {
+        $async = $tcp.BeginConnect($ComputerName, $Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+            throw "Connection timed out after $($TimeoutMs / 1000) seconds"
+        }
+        $tcp.EndConnect($async)
+        $tcp.ReceiveTimeout = $TimeoutMs
+        $tcp.SendTimeout    = $TimeoutMs
+
+        # Accept any certificate (even expired / self-signed / untrusted) so we can still read its dates
+        $callback = [System.Net.Security.RemoteCertificateValidationCallback]{ param($s, $c, $ch, $e) $true }
+
+        $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false, $callback)
+        try {
+            $ssl.AuthenticateAsClient($ComputerName)   # also sends SNI
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $ssl.RemoteCertificate
+            return $cert
+        }
+        finally {
+            $ssl.Dispose()
+        }
+    }
+    finally {
+        $tcp.Close()
+    }
+}
+
+# ---------- Read and clean the server list ----------
+$servers = Get-Content -LiteralPath $InputFile |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ -and -not $_.StartsWith('#') } |
+    ForEach-Object {
+        $_ -replace '^https?://', '' -replace '/.*$', ''   # strip http(s):// and any path
+    }
+
+if (-not $servers) {
+    Write-Error "No servers found in $InputFile"
+    exit 1
+}
+
+Write-Host "Checking $(@($servers).Count) server(s) from $InputFile ..." -ForegroundColor Cyan
+
+# ---------- Check each server ----------
+$results = New-Object System.Collections.Generic.List[object]
+$i = 0
+$total = @($servers).Count
+
+foreach ($entry in $servers) {
+    $i++
+
+    # Split "host:port" if a port was given
+    $hostName = $entry
+    $port     = $DefaultPort
+    if ($entry -match '^(.+):(\d+)$') {
+        $hostName = $Matches[1]
+        $port     = [int]$Matches[2]
+    }
+
+    Write-Progress -Activity 'Checking SSL certificates' -Status "$hostName ($i of $total)" -PercentComplete (($i / $total) * 100)
+
+    $row = [ordered]@{
+        Server        = $hostName
+        Port          = $port
+        Status        = ''
+        ExpiryDate    = ''
+        DaysRemaining = $null
+        ValidFrom     = ''
+        Subject       = ''
+        Issuer        = ''
+        Thumbprint    = ''
+        Error         = ''
+    }
+
+    try {
+        $cert = Get-RemoteCertificate -ComputerName $hostName -Port $port -TimeoutMs ($TimeoutSeconds * 1000)
+
+        $days = [math]::Floor(($cert.NotAfter - (Get-Date)).TotalDays)
+
+        $row.ExpiryDate    = $cert.NotAfter.ToString('yyyy-MM-dd HH:mm')
+        $row.ValidFrom     = $cert.NotBefore.ToString('yyyy-MM-dd HH:mm')
+        $row.DaysRemaining = $days
+        $row.Subject       = $cert.Subject
+        $row.Issuer        = $cert.Issuer
+        $row.Thumbprint    = $cert.Thumbprint
+
+        if     ($days -lt 0)         { $row.Status = 'Expired' }
+        elseif ($days -le $WarnDays) { $row.Status = 'Expiring Soon' }
+        else                         { $row.Status = 'OK' }
+
+        $color = switch ($row.Status) { 'Expired' { 'Red' } 'Expiring Soon' { 'Yellow' } default { 'Green' } }
+        Write-Host ("{0,-40} {1,-14} expires {2} ({3} days)" -f $hostName, $row.Status, $row.ExpiryDate, $days) -ForegroundColor $color
+    }
+    catch {
+        $msg = $_.Exception.Message
+        if ($_.Exception.InnerException) { $msg = $_.Exception.InnerException.Message }
+
+        $row.Status = 'Error'
+        $row.Error  = $msg
+        Write-Host ("{0,-40} {1,-14} {2}" -f $hostName, 'Error', $msg) -ForegroundColor Red
+    }
+
+    $results.Add([pscustomobject]$row)
+}
+
+Write-Progress -Activity 'Checking SSL certificates' -Completed
+
+# ---------- Export to CSV (soonest expiry first, errors last) ----------
+$sorted = $results | Sort-Object @{ Expression = { if ($null -eq $_.DaysRemaining) { [int]::MaxValue } else { $_.DaysRemaining } } }
+
+$sorted | Export-Csv -LiteralPath $OutputFile -NoTypeInformation -Encoding UTF8
+
+# ---------- Summary ----------
+$expired  = @($results | Where-Object Status -eq 'Expired').Count
+$expiring = @($results | Where-Object Status -eq 'Expiring Soon').Count
+$ok       = @($results | Where-Object Status -eq 'OK').Count
+$errors   = @($results | Where-Object Status -eq 'Error').Count
+
+Write-Host ""
+Write-Host "Done. OK: $ok | Expiring within $WarnDays days: $expiring | Expired: $expired | Errors: $errors" -ForegroundColor Cyan
+Write-Host "Report saved to: $OutputFile" -ForegroundColor Cyan
