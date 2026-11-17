@@ -1,0 +1,144 @@
+param(
+    [Parameter(Mandatory = $true)]      [string[]]$ServerNames,
+    [Parameter(Mandatory = $false)]     [string]$SQLPort = '1733',
+    [Parameter(Mandatory = $false)]     [ValidateSet('DEV', 'UAT', 'PRD', 'ALL')]   [string]$Environment = 'DEV'
+)
+
+$ErrorActionPreference = 'Stop'
+Write-Host "Entering into the Script to check SQL Server Version & Installation Date" -ForegroundColor Cyan
+
+# Create credential for remote server access if InstallCred environment variable is set
+$ShareCredential = $null
+if ($env:InstallCred) {
+    $Username = "{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME
+    $Password = ConvertTo-SecureString $env:InstallCred -AsPlainText -Force
+    $ShareCredential = New-Object System.Management.Automation.PSCredential($Username, $Password)
+}
+
+# Define the scriptblock that checks SQL Server details (runs locally or remotely)
+$CheckSqlBlock = {
+    try {
+        # Registry key containing all installed SQL Server instances
+        $InstanceNamesKey = 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL'
+        
+        if (-not (Test-Path $InstanceNamesKey)) {
+            [PSCustomObject]@{
+                ServerName     = $env:COMPUTERNAME
+                InstanceName   = 'None'
+                SQLVersion     = 'None'
+                Version        = 'N/A'
+                PatchLevel     = 'N/A'
+                Edition        = 'N/A'
+                SP             = 'N/A'
+                InstalledDate  = 'N/A'
+                Status         = 'No_SQL_Installed'
+                Remarks        = 'No SQL Server instances found on this server'
+                ErrorMessage   = $null
+            }
+            return
+        }
+
+        # Retrieve all instance mappings (e.g. MSSQLSERVER -> MSSQL15.MSSQLSERVER)
+        $Instances = Get-ItemProperty -Path $InstanceNamesKey -ErrorAction Stop
+        
+        # Loop through each installed instance on the server
+        $Instances.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' } | ForEach-Object {
+            
+            $InstanceName = $_.Name
+            $RegInstanceFolder = $_.Value
+            
+            # Read instance Setup details from Registry
+            $SetupPath = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$RegInstanceFolder\Setup"
+            $Setup = Get-ItemProperty -Path $SetupPath -ErrorAction SilentlyContinue
+
+            if ($Setup) {
+                # Map major version number to friendly marketing name (SQL2022, SQL2019, SQL2017, etc.)
+                $MajorVersion = ($Setup.Version -split '\.')[0]
+                $SQLFriendlyName = Switch ($MajorVersion)
+                {
+                    '16'    { 'SQL2022' }
+                    '15'    { 'SQL2019' }
+                    '14'    { 'SQL2017' }
+                    '13'    { 'SQL2016' }
+                    '12'    { 'SQL2014' }
+                    '11'    { 'SQL2012' }
+                    '10'    { 'SQL2008/SQL2008R2' }
+                    default { "UnknownSQLVersion_$MajorVersion" }
+                }
+
+                # Retrieve installation date from Windows Uninstall registry using the ProductCode
+                $UninstallKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$($Setup.ProductCode)"
+                $Uninstall = Get-ItemProperty -Path $UninstallKey -ErrorAction SilentlyContinue
+
+                # Format the install date
+                $InstallDate = if ($Uninstall.InstallDate) {
+                    # Parses standard Windows MSI date 'YYYYMMDD' into 'YYYY-MM-DD'
+                    [datetime]::ParseExact($Uninstall.InstallDate, 'yyyyMMdd', $null).ToString('yyyy-MM-dd')
+                } elseif ($Setup.SQLPath -and (Test-Path $Setup.SQLPath)) {
+                    # Fallback to directory creation timestamp if registry date is absent
+                    (Get-Item -Path $Setup.SQLPath).CreationTime.ToString('yyyy-MM-dd')
+                } else {
+                    'Unknown'
+                }
+
+                [PSCustomObject]@{
+                    ServerName     = $env:COMPUTERNAME
+                    InstanceName   = $InstanceName
+                    SQLVersion     = $SQLFriendlyName
+                    Version        = $Setup.Version
+                    PatchLevel     = $Setup.PatchLevel
+                    Edition        = $Setup.Edition
+                    SP             = $Setup.SP
+                    InstalledDate  = $InstallDate
+                    Status         = 'Success'
+                    Remarks        = 'OK'
+                    ErrorMessage   = $null
+                }
+            }
+        }
+    }
+    catch {
+        [PSCustomObject]@{
+            ServerName     = $env:COMPUTERNAME
+            InstanceName   = 'Unknown'
+            SQLVersion     = 'Unknown'
+            Version        = 'Unknown'
+            PatchLevel     = 'Unknown'
+            Edition        = 'Unknown'
+            SP             = 'Unknown'
+            InstalledDate  = 'Unknown'
+            Status         = 'Failed'
+            Remarks        = 'Failed to query SQL Server information'
+            ErrorMessage   = $_.Exception.Message
+        }
+    }
+}
+
+# Execute remote query via Invoke-Command across all servers
+$InvokeParams = @{
+    ComputerName  = $ServerNames
+    ThrottleLimit = 25
+    ScriptBlock   = $CheckSqlBlock
+}
+if ($ShareCredential) {
+    $InvokeParams['Credential'] = $ShareCredential
+}
+
+# Run across all servers and collect output
+$SQL_Inventory_Results = try {
+    Invoke-Command @InvokeParams -ErrorAction Stop
+}
+catch {
+    # If running locally against localhost or current machine, execute locally as fallback
+    if ($ServerNames -contains 'localhost' -or $ServerNames -contains $env:COMPUTERNAME) {
+        & $CheckSqlBlock
+    } else {
+        throw $_
+    }
+}
+
+# Display results in console as a clean table
+$SQL_Inventory_Results | Format-Table ServerName, InstanceName, SQLVersion, Version, PatchLevel, Edition, InstalledDate, Status -AutoSize
+
+# Return object output so it can be exported to CSV or used in pipelines
+return $SQL_Inventory_Results
